@@ -38,6 +38,7 @@ Cube 的 Redis 与 SQL 仍属于上游组件依赖。安装脚本支持外部 My
 ```mermaid
 flowchart TB
     User[用户浏览器]
+    VPS["VPS · Nginx HTTPS 与反向 SSH 隧道"]
     subgraph Host["Mac M5 · 首选验证拓扑"]
         subgraph Mac["macOS · 应用控制面"]
             App["Node + TypeScript<br/>React 静态页、会话、任务、桌面代理"]
@@ -45,26 +46,40 @@ flowchart TB
             App --> SQL
         end
         subgraph Linux["Lima ARM64 Linux · CubeSandbox 单节点"]
-            Cube["Cube API / 调度 / 本地存储 / Redis"]
-            Proxy[CubeProxy]
+            subgraph Control["CubeSandbox 控制面"]
+                Cube["CubeAPI → CubeMaster"]
+                Template[CubeTemplateCenter]
+                Redis[(Redis)]
+                Cube --> Redis
+                Template --> Redis
+            end
+            subgraph Data["CubeSandbox 数据面"]
+                Compute["Cubelet → CubeShim → CubeHypervisor"]
+                Proxy[CubeProxy]
+                Disk["XFS · 模板和租户盘"]
+                Compute --> Disk
+            end
             A["租户 A microVM<br/>DSH + XFCE + Chrome + 终端"]
             B["租户 B microVM<br/>DSH + XFCE + Chrome + 终端"]
-            Cube -->|KVM| A
-            Cube -->|KVM| B
+            Cube --> Compute
+            Compute -->|KVM| A
+            Compute -->|KVM| B
             Proxy --> A
             Proxy --> B
         end
     end
-    User -->|同源 HTTPS / SSE / WebSocket| App
+    User -->|HTTPS / SSE / WebSocket| VPS
+    VPS -->|反向 SSH 隧道| App
     App -->|私有 REST| Cube
     App <-->|任务事件 / 桌面流| Proxy
-    Cube -.->|独立 schema| SQL
+    Cube -.->|Cube schema| SQL
     App -->|模型转发| Model[DeepSeek API]
 ```
 
 1. **Mac 路径。** 用独立 Lima 实例启动 ARM64 Linux，使用 `vmType: vz`、`nestedVirtualization: true` 并关闭宿主目录共享。在客体确认 `/dev/kvm` 可打开、KVM 能创建 VM，再用官方固定版本 ARM64 包与匹配的 ARM64 guest kernel 启动最小 sandbox。PVM 快速安装路径仅面向 x86_64。 [Lima 配置](https://github.com/lima-vm/lima/blob/master/templates/default.yaml) · [CubeSandbox ARM64 部署](https://docs.cubesandbox.com/guide/bare-metal-deploy#arm64-aarch64-hosts) · [上游 ARM64 说明](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/hypervisor/docs/arm64.md)
 2. **容量与备选。** 上游单机要求至少 8 GB RAM。本机总内存 16 GB，目前 Docker Linux 客体报告约 7.75 GiB 总内存。先跑一台轻量桌面，再实测两台同时工作时的可用内存、swap 和首帧延迟。租户初始规格以 2 vCPU、2 GiB RAM 为测试起点。若嵌套 KVM 无法完成 Cube 实例启动或并发资源不足，改用一台带可用 KVM 的独立 Linux 节点，应用通过私有链路调用相同的接口。x86_64 节点要用对应架构的内核与桌面模板。
 3. **统一接入。** 一个 `CubeSandboxClient` 按固定版本 `openapi.yml` 封装创建、查询、连接、暂停和快照。应用只接受自身的电脑 ID，从 MySQL 解析对应的沙箱和版本。管理 API 与 CubeProxy 仅在私有网络监听或转发，方便外层 Linux 在本机与独立节点间替换。 [Cube API 契约](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/openapi.yml)
+4. **公网入口。** 沿用已有 VPS 的 Nginx 和由 Mac 发起的 SSH 反向隧道。公网前缀拟用 `/super-agent/`，VPS 只将该前缀代理到本机回环转发端口，再由隧道送到 Mac 上的 Coke Web/API。服务端统一处理登录、任务事件 SSE 和 noVNC WebSocket。发布前查验前缀和回环端口的占用，保留前缀与 WebSocket Upgrade，对 SSE 关闭代理缓冲，并分别验证隧道和已登录产品链路。CubeAPI、CubeProxy 和 MySQL 走应用侧私有连接。 [既有 Grok Bot 的 Nginx 配置](https://github.com/cokepoppy/coke-grok-bot/blob/f917138bbdc8821ec9045e6730d2d6abdd5253b8/deploy/vps/grok-bot.locations.conf)
 
 ## 云电脑与复用清单
 

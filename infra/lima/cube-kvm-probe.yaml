@@ -1,0 +1,31 @@
+# A small, disposable KVM probe, not a CubeSandbox installation host.
+# Use Lima 2.3.0 and an isolated LIMA_HOME without global overrides.
+minimumLimaVersion: 2.3.0
+vmType: vz
+arch: aarch64
+images:
+  - location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/ubuntu-24.04-minimal-cloudimg-arm64.img"
+    arch: aarch64
+    digest: "sha256:3dc8370d923978d4b610fa7964d1b36ba040eefb43198809ca5bc8ac51777b18"
+cpus: 2
+memory: "2GiB"
+disk: "8GiB"
+nestedVirtualization: true
+
+# Plain mode disables mounts, application port forwarding, guest agent and
+# dependency installation. SSH over vsock still permits limactl shell.
+plain: true
+mounts: []
+additionalDisks: []
+portForwards: []
+containerd:
+  system: false
+  user: false
+ssh:
+  overVsock: true
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+networkOpts:
+  hostLoopback: false
+propagateProxyEnv: false
+upgradePackages: false
