@@ -6,6 +6,7 @@ import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie
 import { pool } from './db.ts';
 import { config } from './config.ts';
 import { createQueuedRun, getRunDetail, listEventsAfter, listRuns, runExists } from './task-store.ts';
+import { ComputerNotConfiguredError, ComputerOperationError, getTenantComputer, startTenantComputer } from './computer.ts';
 import type { SessionView } from '../shared/types.ts';
 
 const bodyLimit = 32 * 1024;
@@ -174,6 +175,24 @@ export function createHttpServer() {
       }
 
       const session = requireSession(await sessionFromRequest(req));
+      if (method === 'GET' && url.pathname === '/api/computer') {
+        json(res, 200, { computer: await getTenantComputer(session.tenant.id) });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/computer/start') {
+        requireSameOrigin(req);
+        try {
+          const computer = await startTenantComputer(session.tenant.id);
+          json(res, computer.state === 'creating' ? 202 : 200, { computer });
+        } catch (error) {
+          if (error instanceof ComputerNotConfiguredError) throw new HttpError(503, error.message);
+          if (error instanceof ComputerOperationError) throw new HttpError(502, error.message);
+          throw error;
+        }
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/api/tasks') {
         json(res, 200, { tasks: await listRuns(session.tenant.id) });
         return;

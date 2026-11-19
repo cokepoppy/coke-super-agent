@@ -16,6 +16,15 @@ export const config = {
     password: process.env.MYSQL_PASSWORD || '',
     database: process.env.MYSQL_DATABASE || 'coke_super_agent',
   },
+  cube: {
+    apiUrl: process.env.CUBE_API_URL || '',
+    apiKey: process.env.CUBE_API_KEY || '',
+    templateId: process.env.CUBE_TEMPLATE_ID || '',
+    proxyNodeIp: process.env.CUBE_PROXY_NODE_IP || '',
+    proxyPort: positiveInt(process.env.CUBE_PROXY_PORT_HTTP, 80),
+    proxyScheme: process.env.CUBE_PROXY_SCHEME || 'http',
+    requestTimeoutMs: positiveInt(process.env.CUBE_REQUEST_TIMEOUT_MS, 30_000),
+  },
 };
 
 if (!config.mysql.user || !config.mysql.password) {

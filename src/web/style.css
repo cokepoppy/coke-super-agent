@@ -147,6 +147,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .computer-card>p:not(.eyebrow) { max-width: 400px; margin: 11px 0 18px; color: #86828c; font-size: 11px; line-height: 1.7; }
 .computer-status { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #eceae7; border-radius: 22px; background: #fff; color: #87838c; font-size: 9px; }
 .status-pulse { width: 7px; height: 7px; border-radius: 50%; background: #c99e51; box-shadow: 0 0 0 3px #c99e511c; }
+.status-pulse.running { background: #55ad7e; box-shadow: 0 0 0 3px #55ad7e1c; }
+.status-pulse.failed { background: #c65c55; box-shadow: 0 0 0 3px #c65c551c; }
+.computer-action { margin-top: 15px; padding: 0 18px; }
+.computer-error { margin-top: 12px !important; }
+.computer-footnote { margin-top: 16px !important; color: #a5a2aa !important; font-size: 9px !important; }
 
 .login-page { min-height: 100dvh; display: grid; place-items: center; padding: 28px; background: radial-gradient(ellipse at 50% 32%, #f4f7f2 0, #fbfaf8 47%, #f7f6f3 100%); }
 .login-card { width: min(410px, 100%); padding: 34px 37px 28px; border: 1px solid #eae8e4; border-radius: 17px; background: #fff; box-shadow: 0 18px 55px #28231b0d; }

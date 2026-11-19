@@ -36,6 +36,18 @@ npm run dev
 
 本地 API 默认监听 `127.0.0.1:8080`，Vite 页面监听 `127.0.0.1:5173`。本地种子账号为 `alice` 和 `bob`，密码从本机环境变量读取，不放在仓库中；两者属于不同租户。
 
+使用本机 CubeSandbox 时，先启动本地 Cube 节点，再建立只监听 Mac 回环地址的管理 API 隧道：
+
+```sh
+export CSA_CUBE_LAB_HOME="$HOME/.local/share/csa-cube-node"
+export LIMA_HOME="$CSA_CUBE_LAB_HOME/lima"
+export LIMACTL="$HOME/Library/Application Support/Coke Super Agent/lab/lima-2.3.0/bin/limactl"
+bash scripts/cube/start-local-node.sh
+bash scripts/cube/ensure-local-api-tunnel.sh
+```
+
+在外部环境文件中设置 `CUBE_API_URL=http://127.0.0.1:13000` 和已构建模板的 `CUBE_TEMPLATE_ID`。只有登录用户可启动或恢复自己租户的 microVM；Cube 管理 API 不进入浏览器。
+
 `npm run db:seed` 仅创建演示租户和账号，不会打印密码。若需重置本机演示密码，请在仓库外的环境文件设置 `CSA_TEST_PASSWORD_ALPHA` 与 `CSA_TEST_PASSWORD_BETA` 后重新运行种子命令。
 
 ## 当前可用范围

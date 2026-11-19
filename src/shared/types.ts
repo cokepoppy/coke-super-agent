@@ -1,5 +1,11 @@
 export type RunStatus = 'queued' | 'working' | 'waiting_for_user' | 'done' | 'failed' | 'stopped';
 export type RunEventType = 'queued' | 'progress' | 'waiting_for_user' | 'completed' | 'failed' | 'stopped';
+export type ComputerState = 'not_created' | 'creating' | 'running' | 'paused' | 'failed';
+
+export interface ComputerView {
+  state: ComputerState;
+  updatedAt: string;
+}
 
 export interface SessionView {
   user: { id: string; username: string; displayName: string };

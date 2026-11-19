@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { createRoot } from 'react-dom/client';
-import type { RunDetail, RunEventView, RunSummary, SessionView } from '../shared/types.ts';
+import type { ComputerState, ComputerView, RunDetail, RunEventView, RunSummary, SessionView } from '../shared/types.ts';
 import './style.css';
 
 type View = 'chat' | 'activity' | 'computer';
@@ -206,13 +206,46 @@ function ActivityPanel({ tasks, selected, events, onOpenTask }: { tasks: RunSumm
 }
 
 function ComputerPanel({ tenant }: { tenant: string }) {
+  const [computer, setComputer] = useState<ComputerView | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => api<{ computer: ComputerView }>('/api/computer')
+      .then(result => { if (active) setComputer(result.computer); })
+      .catch(reason => { if (active) setError(reason instanceof Error ? reason.message : '云电脑状态读取失败'); })
+      .finally(() => { if (active) setLoading(false); });
+    void refresh();
+    const interval = setInterval(() => void refresh(), 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, []);
+
+  async function startComputer() {
+    setStarting(true); setError('');
+    try {
+      const result = await api<{ computer: ComputerView }>('/api/computer/start', { method: 'POST', body: '{}' });
+      setComputer(result.computer);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '云电脑暂时无法启动'); }
+    finally { setStarting(false); }
+  }
+
+  const labels: Record<ComputerState, string> = {
+    not_created: '云电脑尚未启动', creating: '正在启动 Linux microVM', running: '基础 Linux microVM 已运行',
+    paused: 'Linux microVM 已暂停', failed: '上次启动失败',
+  };
+
   return <section className="computer-page">
     <div className="computer-card">
       <div className="computer-illustration"><div className="computer-window"><i /><i /><i /><div className="window-line" /><div className="window-line short" /><span>›_</span></div><div className="computer-stand" /></div>
       <p className="eyebrow">PRIVATE LINUX WORKSPACE</p>
       <h1>{tenant} 的云电脑</h1>
-      <p>每个租户会连接到自己的持续运行 Linux microVM。桌面、Chrome、终端和 Agent Runtime 将在同一台电脑内运行。</p>
-      <div className="computer-status"><span className="status-pulse" />云电脑连接尚未建立</div>
+      <p>每个租户使用自己的持久 Linux microVM。当前接入的是 CubeSandbox 基础模板；图形桌面、Chrome 和 Agent Runtime 随后接入。</p>
+      <div className="computer-status"><span className={'status-pulse ' + (computer?.state || 'not_created')} />{loading ? '正在读取云电脑状态' : labels[computer?.state || 'not_created']}</div>
+      {(!computer || computer.state !== 'running') && <button className="primary-button computer-action" onClick={() => void startComputer()} disabled={loading || starting || computer?.state === 'creating'}>{starting ? '正在连接 CubeSandbox…' : computer?.state === 'paused' ? '恢复 Linux microVM' : computer?.state === 'creating' ? '正在准备…' : '启动 Linux microVM'}</button>}
+      {error && <p className="form-error computer-error" role="alert">{error}</p>}
+      <p className="computer-footnote">登录后可启动或恢复租户专属 VM。暂不提供桌面或浏览器画面，直到图形桌面模板接入。</p>
     </div>
   </section>;
 }
