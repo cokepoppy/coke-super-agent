@@ -5,3 +5,5 @@ Coke Super Agent 是一个个人 Agent 项目。首版方案沿用 Coke Dots 的
 [阅读技术方案](docs/technical-plan.md)
 
 [运行 Mac KVM 与 CubeSandbox 主机预检](docs/cube-preflight.md)
+
+本地节点配置与真实 microVM 验证记录见 [CubeSandbox 实测](docs/cube-preflight.md#2026-11-19-m5-本地单节点实测)。

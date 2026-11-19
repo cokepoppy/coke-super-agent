@@ -1,0 +1,35 @@
+# Dedicated CubeSandbox lab node. Requires Lima 2.3.0 and an isolated LIMA_HOME.
+# Create the new raw Lima disk `cube-xfs` before starting this instance.
+minimumLimaVersion: 2.3.0
+vmType: vz
+arch: aarch64
+images:
+  - location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release-20261105/ubuntu-24.04-minimal-cloudimg-arm64.img"
+    arch: aarch64
+    digest: "sha256:3dc8370d923978d4b610fa7964d1b36ba040eefb43198809ca5bc8ac51777b18"
+cpus: 4
+memory: "8GiB"
+disk: "16GiB"
+nestedVirtualization: true
+
+# Plain mode disables host mounts and application port forwarding. The extra
+# raw disk is attached as a block device but must not be formatted or mounted
+# automatically; inspect and provision it explicitly inside this guest.
+plain: true
+mounts: []
+additionalDisks:
+  - name: cube-xfs
+    format: false
+    mount: false
+portForwards: []
+containerd:
+  system: false
+  user: false
+ssh:
+  overVsock: true
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+networkOpts:
+  hostLoopback: false
+propagateProxyEnv: false
+upgradePackages: false

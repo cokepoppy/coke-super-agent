@@ -6,7 +6,7 @@
 
 **一个 TypeScript 应用、一套业务 MySQL、一个 CubeSandbox 节点，每个个人租户一台 Linux microVM。** 同一台租户 VM 内运行 DeepSeek Harness、桌面、浏览器和终端。用户从 Coke Dots 风格的任务页发起工作、看进度、打开电脑和接管，刷新后可以重开任务及其结果。前端构建为静态文件，由 TypeScript 服务同源提供。
 
-**Mac M5 可以作为候选数据面物理机。** 本机 macOS 26.5.1 上，Apple Virtualization.framework 的 `isNestedVirtualizationSupported` 实测为 `true`。CubeSandbox 运行在开启嵌套虚拟化的 ARM64 Linux 客体内，调用该客体的 KVM。可用性以启动真实 CubeSandbox microVM 并通过桌面、存储验收为准。调研期间内盘可用约 51–53 GiB，CubeSandbox 官方要求 `/data/cubelet` 至少有 50 GB 可用空间，首选用加密外置 SSD 承载 Linux VM 和 Cube 数据。 [Apple 虚拟化接口](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported) · [CubeSandbox 部署要求](https://docs.cubesandbox.com/guide/bare-metal-deploy) · [数据盘要求](https://docs.cubesandbox.com/guide/quickstart)
+**Mac M5 已经跑通开发用的本地 Cube 数据面。** 2026-11-19 的实测在 Lima ARM64 Linux 中启动了 CubeSandbox v0.8.0 和一台真实 KVM microVM，并验证官方 SDK 的命令、文件和暂停恢复。该结果证明这台 Mac 可作为单节点开发数据面；XFCE/Chrome、宿主重启恢复和加密租户盘仍需验收，因此尚未作为存放真实租户数据的环境。实验用 24 GiB 限容卷保护 Mac 内盘；该卷未加密。 [实测记录](cube-preflight.md#2026-11-19-m5-本地单节点实测) · [Apple 虚拟化接口](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported) · [CubeSandbox 部署要求](https://docs.cubesandbox.com/guide/bare-metal-deploy)
 
 **Browser Use、Computer Use 和租户内终端默认可用。** 常规导航、点击、输入、运行命令和安装系统包直接执行。站点要求登录、验证码或同类身份验证时，Agent 暂停并提示用户接管同一台电脑。账号、任务、文件、浏览器配置和桌面连接始终归属租户。
 
@@ -31,7 +31,9 @@ DeepSeek Harness 团队原文把工作拆为负责交互和派发的 Router、�
 
 首版验证固定 `v0.8.0`（`41748bb`）。CubeAPI 提供 E2B 兼容的 HTTP API。CubeMaster 负责调度与生命周期。CubeTemplateCenter 管理模板构建。Cubelet 在计算节点通过 containerd 及 CubeShim 启动 CubeHypervisor。VMM 用 Linux KVM 给每台 microVM 启动独立内核。CubeCoW 基于 XFS reflink 管理本地写层和快照，CubeVS 负责网络隔离，CubeProxy 路由客体端口和桌面连接。单节点安装把这些组件放在同一个 Linux 节点，提供一套上游的管理与计算能力。 [架构文档](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/architecture/overview.md) · [KVM 实现](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/hypervisor/hypervisor/src/kvm/mod.rs) · [v0.8.0 发布](https://github.com/TencentCloud/CubeSandbox/releases/tag/v0.8.0)
 
-Cube 的 Redis 与 SQL 仍属于上游组件依赖。安装脚本支持外部 MySQL，首选用 Mac Docker 缓存的 `mysql:8.4` 镜像创建本项目专用实例，建立 `coke_super_agent` 与 `cube_mvp` 两个 schema 和两个限权账号。CubeMaster、CubeTemplateCenter 经私有链路访问 `cube_mvp`。先验证 MySQL 8.4 下上游的 schema 初始化和认证，尤其是官方 Compose 模板的认证参数与外部库连接的差异。如验证失败，Cube 使用官方 MySQL 8.0 配置及独立卷，业务库继续用 8.4。首版用本地存储，可用 `CUBE_SANDBOX_MINIO_ENABLED=0` 关闭随包安装的 MinIO。 [单机安装源码](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/deploy/one-click/install.sh) · [上游依赖配置](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/deploy/one-click/support/docker-compose.yaml.template)
+Cube v0.8.0 单机安装包把 MySQL、Redis（以及可选 MinIO）作为本机 Docker 容器，通过 systemd 管理；CubeProxy 和核心程序按安装包配置运行。它们是控制面/单机部署的配套服务。租户沙箱不是这些 Docker 容器：计算路径是 Cubelet 使用 containerd Shim v2 调用 CubeShim，再由 CubeHypervisor 通过 KVM 启动独立 microVM。本次 Ubuntu 的 Compose v1 兼容错误发生在配套服务容器启动处，给该访客机安装 Compose v2 后 Cube 单机 quickcheck 通过。Mac 上现有 Docker 配置没有改动。 [v0.8.0 单机安装说明](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/deploy/one-click/README.md) · [上游架构](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/architecture/overview.md)
+
+目标方案让 TS 应用使用现有 MySQL 的 `coke_super_agent` schema，并先验证 Cube 能否共用该服务中独立的 `cube_mvp` schema。本轮为保护现有 MySQL 未更改其配置，Cube 使用同一 Lima Linux 节点内由安装包管理的 MySQL 8.0 和 Redis。MySQL 8.4 外部连接、schema 初始化和认证兼容性仍待验证，再决定是否共用。首轮关闭随包 MinIO，用文件存储。 [单机依赖配置](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/deploy/one-click/support/docker-compose.yaml.template)
 
 ## 部署拓扑
 
@@ -49,9 +51,12 @@ flowchart TB
             subgraph Control["CubeSandbox 控制面"]
                 Cube["CubeAPI → CubeMaster"]
                 Template[CubeTemplateCenter]
-                Redis[(Redis)]
+                Redis[(Redis · Docker 配套容器)]
+                CubeSQL[(Cube 控制库 MySQL 8.0 · Docker 配套容器)]
                 Cube --> Redis
                 Template --> Redis
+                Cube --> CubeSQL
+                Template --> CubeSQL
             end
             subgraph Data["CubeSandbox 数据面"]
                 Compute["Cubelet → CubeShim → CubeHypervisor"]
@@ -72,11 +77,12 @@ flowchart TB
     VPS -->|反向 SSH 隧道| App
     App -->|私有 REST| Cube
     App <-->|任务事件 / 桌面流| Proxy
-    Cube -.->|Cube schema| SQL
     App -->|模型转发| Model[DeepSeek API]
 ```
 
-1. **Mac 路径。** 用独立 Lima 实例启动 ARM64 Linux，使用 `vmType: vz`、`nestedVirtualization: true` 并关闭宿主目录共享。在客体确认 `/dev/kvm` 可打开、KVM 能创建 VM，再用官方固定版本 ARM64 包与匹配的 ARM64 guest kernel 启动最小 sandbox。PVM 快速安装路径仅面向 x86_64。 [Lima 配置](https://github.com/lima-vm/lima/blob/master/templates/default.yaml) · [CubeSandbox ARM64 部署](https://docs.cubesandbox.com/guide/bare-metal-deploy#arm64-aarch64-hosts) · [上游 ARM64 说明](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/hypervisor/docs/arm64.md)
+这里有两个逻辑控制面：Mac 上的 Coke TypeScript 服务管理用户、任务和租户到 VM 的归属；同一个 Lima Linux 节点内的 CubeAPI、CubeMaster、CubeTemplateCenter 管理 sandbox 生命周期和模板。节点内的 MySQL/Redis 由 Docker Compose 启动并由 systemd 管理。Cubelet、containerd Shim、CubeShim、CubeHypervisor 与 KVM 构成创建 microVM 的计算路径。两者不需要拆成多台机器或 Coke 微服务；验证外部库兼容性后，再决定是否共用 Mac 上已有的 MySQL 服务。
+
+1. **Mac 路径。** 已按 `infra/lima/cube-node.yaml` 在独立限容卷创建 ARM64 Linux 节点，`vmType: vz`、`nestedVirtualization: true`，无宿主目录挂载。客体 `/dev/kvm` 探针和一台真实 CubeSandbox v0.8.0 microVM 均通过。PVM 快速安装路径仅面向 x86_64。 [本地节点配置与实测](cube-preflight.md#2026-11-19-m5-本地单节点实测) · [CubeSandbox ARM64 部署](https://docs.cubesandbox.com/guide/bare-metal-deploy#arm64-aarch64-hosts) · [上游 ARM64 说明](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/hypervisor/docs/arm64.md)
 2. **容量与备选。** 上游单机要求至少 8 GB RAM。本机总内存 16 GB，目前 Docker Linux 客体报告约 7.75 GiB 总内存。先跑一台轻量桌面，再实测两台同时工作时的可用内存、swap 和首帧延迟。租户初始规格以 2 vCPU、2 GiB RAM 为测试起点。若嵌套 KVM 无法完成 Cube 实例启动或并发资源不足，改用一台带可用 KVM 的独立 Linux 节点，应用通过私有链路调用相同的接口。x86_64 节点要用对应架构的内核与桌面模板。
 3. **统一接入。** 一个 `CubeSandboxClient` 按固定版本 `openapi.yml` 封装创建、查询、连接、暂停和快照。应用只接受自身的电脑 ID，从 MySQL 解析对应的沙箱和版本。管理 API 与 CubeProxy 仅在私有网络监听或转发，方便外层 Linux 在本机与独立节点间替换。 [Cube API 契约](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/openapi.yml)
 4. **公网入口。** 沿用已有 VPS 的 Nginx 和由 Mac 发起的 SSH 反向隧道。公网前缀拟用 `/super-agent/`，VPS 只将该前缀代理到本机回环转发端口，再由隧道送到 Mac 上的 Coke Web/API。服务端统一处理登录、任务事件 SSE 和 noVNC WebSocket。发布前查验前缀和回环端口的占用，保留前缀与 WebSocket Upgrade，对 SSE 关闭代理缓冲，并分别验证隧道和已登录产品链路。CubeAPI、CubeProxy 和 MySQL 走应用侧私有连接。 [既有 Grok Bot 的 Nginx 配置](https://github.com/cokepoppy/coke-grok-bot/blob/f917138bbdc8821ec9045e6730d2d6abdd5253b8/deploy/vps/grok-bot.locations.conf)
@@ -126,12 +132,14 @@ DSH 在 VM 内通过本地工具访问同一个 Chrome 实例和 X11 屏幕。Br
 
 每一步独立完成验证并合入 `main`，再开下一条功能分支。
 
-| 次序 | 通过条件 |
-| --- | --- |
-| 1. 单节点实证 | ARM64 Linux 客体能调用实际 KVM，固定版本 CubeSandbox 启动一个最小真实 microVM。记录硬件、内核、版本、XFS 和实际磁盘消耗。确认 8.4 外部库的迁移和认证。Mac 数据面以实际启动结果决策。 |
-| 2. 可用的租户电脑 | Linux 桌面、Chrome、终端、`sudo apt`、`node`、`python3` 可真实使用。通过已登录的产品 UI 显示 noVNC 首帧并在真实 Chrome 地址栏和独立终端输入。暂停及恢复后验证系统包、浏览器 profile、工作文件。 |
-| 3. DSH 任务闭环 | 从产品发送任务，由 guest 内 DSH 调用真实 DeepSeek。Browser Use 导航并抓取页面内容，Computer Use 根据截图操作非浏览器窗口，终端生成文件并交付。刷新后重新打开任务、进度和可下载的结果。验证进行中的跟进、取消和应用重启对账。 |
-| 4. 接管与两租户 | 用可控的登录/验证码测试页验收“提示接管 → 用户输入 → 交还 → 继续原标签页与任务”。普通浏览和桌面操作全程直接执行。两个账号同时执行不同任务，分别写标记文件并保持各自浏览器状态，交叉访问任务、文件和桌面 WS 均被拒绝。完成租户盘与 MySQL 的恢复演练。 |
+| 次序 | 通过条件 | 当前状态 |
+| --- | --- | --- |
+| 1. 单节点实证 | ARM64 Linux 客体调用 KVM，CubeSandbox 启动真实 microVM；记录硬件、内核、版本和 XFS。验证外部 MySQL 8.4 兼容性。 | KVM、Cube v0.8.0、单 VM、SDK 命令/文件和暂停恢复通过；外部 MySQL 待验。 |
+| 2. 可用的租户电脑 | Linux 桌面、Chrome、终端、`sudo apt`、`node`、`python3` 可真实使用。通过产品 UI 显示 noVNC 首帧并在 Chrome 地址栏和终端输入。暂停恢复后验证包、浏览器 profile、工作文件。 | 未开始。 |
+| 3. DSH 任务闭环 | 从产品发送任务，由 guest 内 DSH 调用真实 DeepSeek。Browser Use 导航并抓取页面内容，Computer Use 根据截图操作非浏览器窗口，终端生成文件并交付。刷新后重新打开任务、进度和可下载的结果。验证进行中的跟进、取消和应用重启对账。 | 未开始。 |
+| 4. 接管与两租户 | 用可控的登录/验证码测试页验收“提示接管 → 用户输入 → 交还 → 继续原标签页与任务”。普通浏览和桌面操作全程直接执行。两个账号同时执行不同任务，分别写标记文件并保持各自浏览器状态，交叉访问任务、文件和桌面 WS 均被拒绝。完成租户盘与 MySQL 的恢复演练。 | 未开始。 |
+
+第一阶段的 M5/KVM/Cube v0.8.0 单 microVM、官方 SDK 命令与文件调用以及暂停恢复已通过；外部 MySQL 8.4 尚未接入，整机重启也没有测试。其余阶段仍待实施。
 
 最终从已登录的 Coke Super Agent 网页完成上述任务和接管链路。每轮记录对应的 Git SHA、Cube 模板、DSH/模型版本、租户电脑标识、用户可见结果与端到端用例。KVM 探针、接口连通和桌面首帧用于定位各层问题，完整产品验收以真实任务结果、接管后继续和双租户数据为准。
 
