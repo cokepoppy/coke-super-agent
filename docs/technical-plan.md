@@ -89,7 +89,7 @@ flowchart TB
 
 ## 云电脑与复用清单
 
-CubeSandbox 自带 Ubuntu 22.04 图形桌面示例，使用 noVNC 并保留 `envd` 启动入口。已用远程镜像清单确认示例基础镜像 `cubesandbox-base:2026.16` 包含 `linux/arm64` 和 `linux/amd64`。首版沿用该基础镜像，复用 Coke Dots 的轻量 XFCE/Xvfb 桌面栈。一个 guest 镜像包含 Google Chrome、XFCE Terminal、Node.js/npm、Python 3/venv 和 DSH。Google 官方 ARM64 APT 索引已列出稳定版 `google-chrome-stable`，走官方签名仓库安装，运行时保留 Chrome 沙箱并使用租户专属 profile。用户或 Agent 可用 guest 内的 `sudo apt` 安装包。 [上游桌面指南](https://docs.cubesandbox.com/guide/integrations/ubuntu-desktop) · [上游 Dockerfile](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/Dockerfile) · [Google ARM64 APT 索引](https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-arm64/Packages.gz)
+CubeSandbox 自带 Ubuntu 22.04 图形桌面示例，使用 noVNC 并保留 `envd` 启动入口。已用远程镜像清单确认示例基础镜像 `cubesandbox-base:2026.16` 包含 `linux/arm64` 和 `linux/amd64`。当前先从已验证的 `sandbox-code` ARM64 镜像派生一个声明 `6080` noVNC 与 `49983` envd 端口的模板，再在该租户 VM 内安装 XFCE/Xvfb、Google Chrome、Node.js/npm 和 Python 3/venv。这样可以在不加长期注册表服务的情况下先跑通桌面；后续再根据每租户初始化耗时和可写层增长决定是否烘焙成共享 OCI 桌面镜像。每位用户仍可用 guest 内的 `sudo apt` 安装包。 [CubeSandbox 桌面示例](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/README.md) · [CubeSandbox Dockerfile](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/Dockerfile) · [Google ARM64 APT 索引](https://dl.google.com/linux/chrome/deb/dists/stable/main/binary-arm64/Packages.gz)
 
 | 复用来源 | 迁入内容 |
 | --- | --- |
@@ -135,7 +135,7 @@ DSH 在 VM 内通过本地工具访问同一个 Chrome 实例和 X11 屏幕。Br
 | 次序 | 通过条件 | 当前状态 |
 | --- | --- | --- |
 | 1. 单节点实证 | ARM64 Linux 客体调用 KVM，CubeSandbox 启动真实 microVM；记录硬件、内核、版本和 XFS。验证外部 MySQL 8.4 兼容性。 | KVM、Cube v0.8.0、单 VM、SDK 命令/文件和暂停恢复通过；外部 MySQL 待验。 |
-| 2. 可用的租户电脑 | Linux 桌面、Chrome、终端、`sudo apt`、`node`、`python3` 可真实使用。通过产品 UI 显示 noVNC 首帧并在 Chrome 地址栏和终端输入。暂停恢复后验证包、浏览器 profile、工作文件。 | 未开始。 |
+| 2. 可用的租户电脑 | Linux 桌面、Chrome、终端、`sudo apt`、`node`、`python3` 可真实使用。通过产品 UI 显示 noVNC 首帧并在 Chrome 地址栏和终端输入。暂停恢复后验证包、浏览器 profile、工作文件。 | 官方 SDK 生命周期已接入，带 noVNC/envd 端口的基础模板已在本地 Cube 创建；桌面 bootstrap、首帧和恢复验收待做。 |
 | 3. DSH 任务闭环 | 从产品发送任务，由 guest 内 DSH 调用真实 DeepSeek。Browser Use 导航并抓取页面内容，Computer Use 根据截图操作非浏览器窗口，终端生成文件并交付。刷新后重新打开任务、进度和可下载的结果。验证进行中的跟进、取消和应用重启对账。 | 未开始。 |
 | 4. 接管与两租户 | 用可控的登录/验证码测试页验收“提示接管 → 用户输入 → 交还 → 继续原标签页与任务”。普通浏览和桌面操作全程直接执行。两个账号同时执行不同任务，分别写标记文件并保持各自浏览器状态，交叉访问任务、文件和桌面 WS 均被拒绝。完成租户盘与 MySQL 的恢复演练。 | 未开始。 |
 

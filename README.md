@@ -6,6 +6,8 @@ Coke Super Agent 是一个个人 Agent 项目。首版方案沿用 Coke Dots 的
 
 [运行 Mac KVM 与 CubeSandbox 主机预检](docs/cube-preflight.md)
 
+[桌面模板设计与本地创建](docs/desktop-template.md)
+
 本地节点配置与真实 microVM 验证记录见 [CubeSandbox 实测](docs/cube-preflight.md#2026-11-19-m5-本地单节点实测)。
 
 当前代码已包含 TypeScript API、Dots 风格任务工作区、MySQL 登录与租户隔离的任务记录，并通过官方 CubeSandbox SDK 实现每租户一台持久 microVM 的启动与恢复入口。任务会保存为 `queued`；DeepSeek Harness 和图形桌面/Chrome 模板仍在后续阶段接入，页面会明确显示尚未连接。

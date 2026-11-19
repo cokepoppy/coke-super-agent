@@ -14,6 +14,7 @@
     "start": "tsx src/server/index.ts",
     "db:migrate": "tsx src/server/migrate.ts",
     "db:seed": "tsx src/server/seed.ts",
+    "cube:desktop-template": "tsx scripts/cube/create-desktop-template.ts",
     "test": "tsx --test src/server/*.test.ts"
   },
   "dependencies": {

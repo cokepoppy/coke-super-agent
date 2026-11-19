@@ -54,4 +54,5 @@ bash scripts/cube/ensure-local-api-tunnel.sh
 
 - 登录、登出、任务保存、历史读取和 SSE 事件已连接 MySQL。
 - 服务端按会话中的租户 ID 过滤任务。Alice 与 Bob 可用于验证租户边界。
-- Agent Runtime 尚未接入，提交的任务会停留在 `queued`；云电脑页面也会说明连接状态，不代表 DSH 或 microVM 已可用。
+- CubeSandbox SDK 已提供每租户一台 microVM 的启动和恢复入口。新基础模板已声明 noVNC/envd 端口，但 XFCE/Chrome 启动和页面 noVNC 代理仍待接入。
+- Agent Runtime 尚未接入，提交的任务会停留在 `queued`。
