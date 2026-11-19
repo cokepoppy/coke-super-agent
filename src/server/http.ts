@@ -6,7 +6,8 @@ import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie
 import { pool } from './db.ts';
 import { config } from './config.ts';
 import { createQueuedRun, getRunDetail, listEventsAfter, listRuns, runExists } from './task-store.ts';
-import { ComputerNotConfiguredError, ComputerOperationError, getTenantComputer, startTenantComputer } from './computer.ts';
+import { ComputerNotConfiguredError, ComputerOperationError, DesktopNotReadyError, getTenantComputer, startTenantComputer } from './computer.ts';
+import { proxyDesktopHttp, proxyDesktopUpgrade } from './desktop-proxy.ts';
 import type { SessionView } from '../shared/types.ts';
 
 const bodyLimit = 32 * 1024;
@@ -136,7 +137,7 @@ async function serveStatic(pathname: string, res: ServerResponse): Promise<boole
 }
 
 export function createHttpServer() {
-  return createServer(async (req, res) => {
+  const server = createServer(async (req, res) => {
     const method = req.method || 'GET';
     let url: URL;
     try { url = new URL(req.url || '/', 'http://localhost'); }
@@ -193,6 +194,11 @@ export function createHttpServer() {
         return;
       }
 
+      if (url.pathname.startsWith('/api/computer/desktop/')) {
+        await proxyDesktopHttp(req, res, session.tenant.id, url.pathname, url.search);
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/api/tasks') {
         json(res, 200, { tasks: await listRuns(session.tenant.id) });
         return;
@@ -236,6 +242,30 @@ export function createHttpServer() {
       json(res, 500, { error: '服务暂时不可用' });
     }
   });
+
+  server.on('upgrade', (req, socket, head) => {
+    void (async () => {
+      let url: URL;
+      try { url = new URL(req.url || '/', 'http://localhost'); }
+      catch { socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
+      if (!url.pathname.startsWith('/api/computer/desktop/')) {
+        socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        return;
+      }
+      if (!requestIsSameOrigin(req)) {
+        socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        return;
+      }
+      const session = requireSession(await sessionFromRequest(req));
+      await proxyDesktopUpgrade(req, socket, head, session.tenant.id, url.pathname, url.search);
+    })().catch(error => {
+      const status = error instanceof HttpError ? error.status : error instanceof DesktopNotReadyError ? 409 : 502;
+      const message = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : status === 409 ? 'Conflict' : 'Bad Gateway';
+      if (!socket.destroyed) socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    });
+  });
+
+  return server;
 }
 
 export function listen(): ReturnType<typeof createHttpServer> {

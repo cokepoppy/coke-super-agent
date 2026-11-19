@@ -36,6 +36,8 @@ npm run dev
 
 本地 API 默认监听 `127.0.0.1:8080`，Vite 页面监听 `127.0.0.1:5173`。本地种子账号为 `alice` 和 `bob`，密码从本机环境变量读取，不放在仓库中；两者属于不同租户。
 
+设置仓库外环境文件中的 `CSA_TOKEN_ENCRYPTION_KEY` 为稳定的 32 字节随机 base64url 密钥。CubeSandbox 返回的私有数据面令牌以 AES-256-GCM 加密后保存在专用 MySQL 库中；更换密钥前需先迁移现有密文。
+
 使用本机 CubeSandbox 时，先启动本地 Cube 节点，再建立只监听 Mac 回环地址的管理 API 隧道：
 
 ```sh

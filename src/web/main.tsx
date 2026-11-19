@@ -232,20 +232,37 @@ function ComputerPanel({ tenant }: { tenant: string }) {
   }
 
   const labels: Record<ComputerState, string> = {
-    not_created: '云电脑尚未启动', creating: '正在启动 Linux microVM', running: '基础 Linux microVM 已运行',
+    not_created: '云电脑尚未启动', creating: '正在启动 Linux microVM', running: 'Linux microVM 已运行',
     paused: 'Linux microVM 已暂停', failed: '上次启动失败',
   };
+  const desktopUrl = '/api/computer/desktop/vnc.html?autoconnect=true&resize=scale&path=' + encodeURIComponent('/api/computer/desktop/websockify');
+  const desktopReady = computer?.state === 'running' && computer.desktopState === 'ready';
+
+  if (desktopReady) return <section className="computer-page desktop-ready">
+    <div className="desktop-view">
+      <header className="desktop-toolbar">
+        <div><span className="status-pulse running" />{tenant} 的 Linux 云电脑</div>
+        <a href={desktopUrl} target="_blank" rel="noreferrer">在新窗口打开</a>
+      </header>
+      <iframe className="desktop-frame" title={`${tenant} 的 Linux 云电脑`} src={desktopUrl} allow="clipboard-read; clipboard-write; fullscreen" />
+    </div>
+  </section>;
+
+  const desktopStatus = computer?.state === 'running' ? {
+    pending: 'Linux 桌面尚未安装', installing: '正在安装 Linux 桌面与开发环境', ready: 'Linux 桌面已就绪', failed: '桌面初始化失败，可重试',
+  }[computer.desktopState] : '';
+  const canStart = !computer || computer.state !== 'running' || computer.desktopState === 'pending' || computer.desktopState === 'failed';
 
   return <section className="computer-page">
     <div className="computer-card">
       <div className="computer-illustration"><div className="computer-window"><i /><i /><i /><div className="window-line" /><div className="window-line short" /><span>›_</span></div><div className="computer-stand" /></div>
       <p className="eyebrow">PRIVATE LINUX WORKSPACE</p>
       <h1>{tenant} 的云电脑</h1>
-      <p>每个租户使用自己的持久 Linux microVM。当前接入的是 CubeSandbox 基础模板；图形桌面、Chrome 和 Agent Runtime 随后接入。</p>
-      <div className="computer-status"><span className={'status-pulse ' + (computer?.state || 'not_created')} />{loading ? '正在读取云电脑状态' : labels[computer?.state || 'not_created']}</div>
-      {(!computer || computer.state !== 'running') && <button className="primary-button computer-action" onClick={() => void startComputer()} disabled={loading || starting || computer?.state === 'creating'}>{starting ? '正在连接 CubeSandbox…' : computer?.state === 'paused' ? '恢复 Linux microVM' : computer?.state === 'creating' ? '正在准备…' : '启动 Linux microVM'}</button>}
+      <p>每个租户使用自己的持久 Linux microVM，包含 XFCE 桌面、Chromium、终端、Node.js 和 Python。浏览器与桌面操作直接在这台租户电脑中进行。</p>
+      <div className="computer-status"><span className={'status-pulse ' + (computer?.state || 'not_created')} />{loading ? '正在读取云电脑状态' : desktopStatus || labels[computer?.state || 'not_created']}</div>
+      {canStart && <button className="primary-button computer-action" onClick={() => void startComputer()} disabled={loading || starting || computer?.state === 'creating'}>{starting ? '正在准备 Linux 云电脑…' : computer?.state === 'paused' ? '恢复 Linux microVM' : computer?.state === 'running' && computer.desktopState === 'failed' ? '重试桌面安装' : computer?.state === 'running' ? '安装 Linux 桌面' : computer?.state === 'creating' ? '正在准备…' : '启动 Linux 云电脑'}</button>}
       {error && <p className="form-error computer-error" role="alert">{error}</p>}
-      <p className="computer-footnote">登录后可启动或恢复租户专属 VM。暂不提供桌面或浏览器画面，直到图形桌面模板接入。</p>
+      <p className="computer-footnote">首次启动会在 microVM 内安装桌面与开发工具，之后会保留此租户的浏览器配置和文件。</p>
     </div>
   </section>;
 }

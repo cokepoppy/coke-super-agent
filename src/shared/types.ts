@@ -1,9 +1,11 @@
 export type RunStatus = 'queued' | 'working' | 'waiting_for_user' | 'done' | 'failed' | 'stopped';
 export type RunEventType = 'queued' | 'progress' | 'waiting_for_user' | 'completed' | 'failed' | 'stopped';
 export type ComputerState = 'not_created' | 'creating' | 'running' | 'paused' | 'failed';
+export type DesktopState = 'pending' | 'installing' | 'ready' | 'failed';
 
 export interface ComputerView {
   state: ComputerState;
+  desktopState: DesktopState;
   updatedAt: string;
 }
 

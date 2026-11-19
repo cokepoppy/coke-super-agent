@@ -9,6 +9,7 @@ export const config = {
   host: process.env.CSA_HOST || '127.0.0.1',
   port: positiveInt(process.env.CSA_PORT, 8080),
   cookieSecure: process.env.CSA_COOKIE_SECURE === 'true' || (process.env.NODE_ENV === 'production' && process.env.CSA_COOKIE_SECURE !== 'false'),
+  tokenEncryptionKey: process.env.CSA_TOKEN_ENCRYPTION_KEY || '',
   mysql: {
     host: process.env.MYSQL_HOST || '127.0.0.1',
     port: positiveInt(process.env.MYSQL_PORT, 3306),
@@ -23,6 +24,7 @@ export const config = {
     proxyNodeIp: process.env.CUBE_PROXY_NODE_IP || '',
     proxyPort: positiveInt(process.env.CUBE_PROXY_PORT_HTTP, 80),
     proxyScheme: process.env.CUBE_PROXY_SCHEME || 'http',
+    sandboxDomain: process.env.CUBE_SANDBOX_DOMAIN || 'cube.app',
     requestTimeoutMs: positiveInt(process.env.CUBE_REQUEST_TIMEOUT_MS, 30_000),
   },
 };
