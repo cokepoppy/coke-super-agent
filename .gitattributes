@@ -1,0 +1,3 @@
+# Preserve the original noVNC distribution and whitespace-significant patch context.
+public/novnc/** -whitespace
+patches/*.patch -whitespace

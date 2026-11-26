@@ -11,6 +11,15 @@ if [[ -z "$LIMA_HOME" ]]; then
   LIMA_HOME="$CSA_CUBE_LAB_HOME/lima"
 fi
 LIMACTL="$(printenv LIMACTL 2>/dev/null || command -v limactl || true)"
+data_disk_size="${CSA_CUBE_DATA_DISK_SIZE:-80GiB}"
+
+case "$data_disk_size" in
+  64GiB|80GiB|100GiB) ;;
+  *)
+    echo "CSA_CUBE_DATA_DISK_SIZE must be 64GiB, 80GiB, or 100GiB; found: $data_disk_size" >&2
+    exit 2
+    ;;
+esac
 
 if [[ -z "$LIMACTL" || ! -x "$LIMACTL" ]]; then
   echo "Set LIMACTL to the Lima 2.3.0 binary or add limactl to PATH." >&2
@@ -48,11 +57,11 @@ fi
 export LIMA_HOME
 disk_row="$("$LIMACTL" disk ls | awk '$1 == "cube-xfs" { print; found = 1 } END { if (!found) exit 1 }' || true)"
 if [[ -z "$disk_row" ]]; then
-  "$LIMACTL" disk create cube-xfs --size 64GiB --format raw
+  "$LIMACTL" disk create cube-xfs --size "$data_disk_size" --format raw
 else
   read -r disk_name disk_size disk_format disk_dir disk_owner <<< "$disk_row"
-  if [[ "$disk_size" != "64GiB" || "$disk_format" != "raw" ]]; then
-    echo "Existing cube-xfs disk is not the expected 64 GiB raw disk; inspect it before proceeding." >&2
+  if [[ ( "$disk_size" != "64GiB" && "$disk_size" != "80GiB" && "$disk_size" != "100GiB" ) || "$disk_format" != "raw" ]]; then
+    echo "Existing cube-xfs disk is not a supported 64, 80, or 100 GiB raw disk; inspect it before proceeding." >&2
     exit 1
   fi
   if [[ -n "$disk_owner" && "$disk_owner" != "cube-node" ]]; then

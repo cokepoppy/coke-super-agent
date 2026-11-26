@@ -1,0 +1,2 @@
+ALTER TABLE computers
+  ADD COLUMN create_pending BOOLEAN NOT NULL DEFAULT FALSE AFTER generation;

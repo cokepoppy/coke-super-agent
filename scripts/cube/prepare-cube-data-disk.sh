@@ -4,7 +4,7 @@ set -euo pipefail
 device=/dev/vdb
 mount_path=/data/cubelet
 fstab=/etc/fstab
-expected_bytes=68719476736
+minimum_bytes=68719476736
 expected_label=CSA_CUBE
 apply=0
 
@@ -31,8 +31,8 @@ if [[ "$apply" -eq 1 ]]; then
 fi
 
 if [[ ! -b "$device" ]] || ! size="$(blockdev --getsize64 "$device")" ||
-   [[ "$size" != "$expected_bytes" ]]; then
-  echo "Expected the dedicated 64 GiB Lima disk at $device." >&2
+   [[ ! "$size" =~ ^[0-9]+$ ]] || [[ "$size" -lt "$minimum_bytes" ]]; then
+  echo "Expected a dedicated Lima disk of at least 64 GiB at $device." >&2
   exit 1
 fi
 if ! disk_type="$(lsblk -dn -o TYPE "$device")" ||
@@ -57,11 +57,26 @@ if ! mounts="$(findmnt --kernel --all --raw --noheadings --output TARGET,MAJ:MIN
   exit 1
 fi
 target_id="$(printf '%s\n' "$mounts" | awk -v target="$mount_path" '$1 == target { print $2 }')"
-other_mount="$(printf '%s\n' "$mounts" | awk -v target="$mount_path" -v id="$device_id" '$2 == id && $1 != target { print $1; exit }')"
-if [[ -n "$other_mount" ]]; then
-  echo "$device is also mounted at $other_mount; inspect it before proceeding." >&2
-  exit 1
-fi
+while IFS= read -r other_mount; do
+  [[ -z "$other_mount" ]] && continue
+  if ! other_info="$(findmnt --kernel --raw --noheadings --mountpoint "$other_mount" --output MAJ:MIN,FSTYPE,FSROOT,OPTIONS)"; then
+    echo "$device is also mounted at an unexpected path: $other_mount." >&2
+    exit 1
+  fi
+  read -r other_id other_type other_root other_options <<< "$other_info"
+  case "$other_mount:$other_root" in
+    "/data/CubeMaster/storage:/CubeMaster/storage"|"/usr/local/services/cubetoolbox/cubebox_os_image:/cubebox_os_image") ;;
+    *)
+      echo "$device has an unexpected additional mount: $other_mount (root $other_root)." >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$other_id" != "$device_id" || "$other_type" != "xfs" ]] ||
+     [[ ",$other_options," != *,rw,* ]]; then
+    echo "$other_mount is not a verified read-write subdirectory mount of the expected XFS device." >&2
+    exit 1
+  fi
+done < <(printf '%s\n' "$mounts" | awk -v target="$mount_path" -v id="$device_id" '$2 == id && $1 != target { print $1 }')
 mounted=0
 if [[ -n "$target_id" ]]; then
   if [[ "$target_id" != "$device_id" ]] ||
@@ -159,6 +174,15 @@ if [[ -z "$signatures" ]]; then
   fi
 fi
 
+# --apply is also the explicit opt-in for growing a verified XFS filesystem
+# after its backing Lima disk has been enlarged. xfs_growfs only grows XFS.
+if [[ -n "$signatures" ]]; then
+  if ! command -v xfs_growfs >/dev/null 2>&1; then
+    echo "Install xfsprogs in the guest before growing the existing XFS filesystem." >&2
+    exit 1
+  fi
+fi
+
 if [[ "$mounted" -eq 0 ]]; then
   mkdir -p "$mount_path"
   mount "$device" "$mount_path"
@@ -175,6 +199,9 @@ if [[ "$mounted" -eq 0 ]]; then
 fi
 if [[ "$fstab_entry" -eq 0 ]]; then
   printf 'UUID=%s %s xfs defaults,nofail 0 2\n' "$uuid" "$mount_path" >> "$fstab"
+fi
+if [[ -n "$signatures" ]]; then
+  xfs_growfs "$mount_path"
 fi
 systemctl daemon-reload
 echo "PASS: $device is mounted at $mount_path with XFS reflink and an fstab entry."

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.coke.super-agent.api</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/shangguan/.local/opt/node-v24.18.0-darwin-arm64/bin/node</string>
+    <string>/Users/shangguan/Documents/home2026/coke-super-agent/node_modules/tsx/dist/cli.mjs</string>
+    <string>src/server/index.ts</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/shangguan/Documents/home2026/coke-super-agent</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CSA_HOST</key>
+    <string>127.0.0.1</string>
+    <key>CSA_PORT</key>
+    <string>8080</string>
+    <key>CSA_COOKIE_SECURE</key>
+    <string>true</string>
+    <key>DOTENV_CONFIG_PATH</key>
+    <string>/Users/shangguan/.local/share/csa-cube-node/coke-super-agent.env</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>PATH</key>
+    <string>/Users/shangguan/.local/opt/node-v24.18.0-darwin-arm64/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/shangguan/Library/Logs/coke-super-agent-api.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/shangguan/Library/Logs/coke-super-agent-api.err.log</string>
+</dict>
+</plist>

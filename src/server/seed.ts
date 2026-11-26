@@ -16,7 +16,7 @@ async function ensureTenant(slug: string, name: string): Promise<string> {
 async function ensureUser(tenantId: string, username: string, displayName: string, passwordValue: string): Promise<void> {
   const passwordHash = await hashPassword(passwordValue);
   await pool.execute(
-    'INSERT INTO users (id, tenant_id, username, display_name, password_hash) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE display_name = VALUES(display_name)',
+    'INSERT INTO users (id, tenant_id, username, display_name, password_hash) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE display_name = VALUES(display_name), password_hash = VALUES(password_hash)',
     [randomUUID(), tenantId, username, displayName, passwordHash],
   );
   await pool.execute('INSERT IGNORE INTO computers (tenant_id) VALUES (?)', [tenantId]);

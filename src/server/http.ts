@@ -1,17 +1,43 @@
 import { createReadStream } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { extname, resolve, sep } from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { extname, posix, resolve, sep } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie } from './auth.ts';
 import { pool } from './db.ts';
 import { config } from './config.ts';
-import { createQueuedRun, getRunDetail, listEventsAfter, listRuns, runExists } from './task-store.ts';
-import { ComputerNotConfiguredError, ComputerOperationError, DesktopNotReadyError, getTenantComputer, startTenantComputer } from './computer.ts';
+import { createQueuedReplyRun, createQueuedRun, getRunDetail, listEventsAfter, listRecentActivity, listRuns, runExists } from './task-store.ts';
+import { ComputerNotConfiguredError, ComputerNotReadyError, ComputerOperationError, ComputerRecoveryRequiredError, DesktopNotReadyError, connectTenantSandbox, getTenantBrowserState, getTenantComputer, retryTenantBrowser, startTenantComputer } from './computer.ts';
 import { proxyDesktopHttp, proxyDesktopUpgrade } from './desktop-proxy.ts';
+import { scheduleAgentRun } from './agent-runtime.ts';
+import { listTaskArtifacts, taskArtifactAbsolutePath } from './artifacts.ts';
 import type { SessionView } from '../shared/types.ts';
 
 const bodyLimit = 32 * 1024;
 const eventId = /^[1-9][0-9]*$/;
+
+function writeHttpLog(stage: string, level: 'info' | 'warning' | 'error', details: Record<string, unknown>): void {
+  process.stdout.write(JSON.stringify({ timestamp: new Date().toISOString(), logger: 'coke-super-agent.http', stage, level, ...details }) + '\n');
+}
+
+function safeHttpError(error: unknown): Record<string, string> {
+  const value = error instanceof Error ? error : new Error(String(error));
+  const secrets = [config.agent.apiKey, config.cube.apiKey].filter(Boolean);
+  const redact = (text: string): string => secrets.reduce((result, secret) => result.split(secret).join('[redacted]'), text)
+    .replace(/\b(Bearer|Basic)\s+[^\s"'`]+/gi, '$1 [redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[redacted-api-key]')
+    .replace(/((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/(?:https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, 'https://[redacted]@');
+  const result: Record<string, string> = { errorName: value.name || 'Error', error: redact(value.message).slice(0, 1200) };
+  if (value.stack) result.errorStack = redact(value.stack).slice(-4000);
+  if (value.cause instanceof Error) {
+    result.errorCause = redact(value.cause.message).slice(0, 1200);
+    if (value.cause.stack) result.errorCauseStack = redact(value.cause.stack).slice(-2000);
+  }
+  return result;
+}
 
 function json(res: ServerResponse, status: number, payload: unknown): void {
   const body = Buffer.from(JSON.stringify(payload));
@@ -56,6 +82,13 @@ function requestIsSameOrigin(req: IncomingMessage): boolean {
   if (!host || !['http', 'https'].includes(proto)) return false;
   try { return new URL(origin).origin === proto + '://' + host.split(',')[0].trim(); }
   catch { return false; }
+}
+
+function requestIdFor(req: IncomingMessage): string {
+  const edgeRequestId = req.headers['x-csa-edge-request-id'];
+  return typeof edgeRequestId === 'string' && /^[a-f0-9]{32}$/i.test(edgeRequestId)
+    ? edgeRequestId
+    : randomUUID();
 }
 
 function requireSameOrigin(req: IncomingMessage): void {
@@ -113,11 +146,34 @@ function streamEvents(req: IncomingMessage, res: ServerResponse, session: Sessio
 function contentType(pathname: string): string {
   const extension = extname(pathname).toLowerCase();
   const types: Record<string, string> = {
-    '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-    '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.json': 'application/json; charset=utf-8',
+    '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+    '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif',
+    '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.oga': 'audio/ogg', '.mp3': 'audio/mpeg', '.pdf': 'application/pdf', '.md': 'text/markdown; charset=utf-8',
+    '.csv': 'text/csv; charset=utf-8', '.json': 'application/json; charset=utf-8',
   };
   return types[extension] || 'application/octet-stream';
 }
+
+function taskWorkspace(threadId: string): string {
+  return posix.join('/workspace/tasks', threadId);
+}
+
+async function artifactStaysInsideTask(sandbox: Awaited<ReturnType<typeof connectTenantSandbox>>, root: string, absolutePath: string): Promise<boolean> {
+  const rootArg = Buffer.from(root).toString('base64');
+  const pathArg = Buffer.from(absolutePath).toString('base64');
+  const command = `/usr/bin/python3 -c 'import base64,os,sys; root=base64.b64decode(sys.argv[1]).decode(); target=base64.b64decode(sys.argv[2]).decode(); resolved_root=os.path.realpath(root); resolved_target=os.path.realpath(target); print("ok" if resolved_root == root and resolved_target == target and os.path.commonpath((root,resolved_target)) == root and os.path.isfile(resolved_target) else "missing")' '${rootArg}' '${pathArg}'`;
+  const result = await sandbox.commands.run(command, { timeoutMs: 10_000 });
+  return result.exitCode === 0 && result.stdout.trim() === 'ok';
+}
+
+function attachmentDisposition(filename: string, disposition: 'attachment' | 'inline' = 'attachment'): string {
+  const fallback = filename.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'download';
+  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+const maxArtifactDownloadBytes = 100 * 1024 * 1024;
+const maxArtifactPreviewBytes = 25 * 1024 * 1024;
 
 async function serveStatic(pathname: string, res: ServerResponse): Promise<boolean> {
   const root = resolve(process.cwd(), 'dist');
@@ -138,6 +194,9 @@ async function serveStatic(pathname: string, res: ServerResponse): Promise<boole
 
 export function createHttpServer() {
   const server = createServer(async (req, res) => {
+    const requestId = requestIdFor(req);
+    let tenantId = '';
+    res.setHeader('x-csa-request-id', requestId);
     const method = req.method || 'GET';
     let url: URL;
     try { url = new URL(req.url || '/', 'http://localhost'); }
@@ -176,8 +235,22 @@ export function createHttpServer() {
       }
 
       const session = requireSession(await sessionFromRequest(req));
+      tenantId = session.tenant.id;
       if (method === 'GET' && url.pathname === '/api/computer') {
         json(res, 200, { computer: await getTenantComputer(session.tenant.id) });
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/computer/browser') {
+        json(res, 200, { browserState: await getTenantBrowserState(session.tenant.id) });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/computer/browser/retry') {
+        requireSameOrigin(req);
+        const queued = await retryTenantBrowser(session.tenant.id);
+        writeHttpLog('computer.browser.retry', 'info', { requestId, tenantId, queued });
+        json(res, queued ? 202 : 409, { queued });
         return;
       }
 
@@ -185,9 +258,11 @@ export function createHttpServer() {
         requireSameOrigin(req);
         try {
           const computer = await startTenantComputer(session.tenant.id);
+          writeHttpLog('computer.start.accepted', 'info', { requestId, tenantId, computerState: computer.state, desktopState: computer.desktopState });
           json(res, computer.state === 'creating' ? 202 : 200, { computer });
         } catch (error) {
           if (error instanceof ComputerNotConfiguredError) throw new HttpError(503, error.message);
+          if (error instanceof ComputerRecoveryRequiredError) throw new HttpError(409, error.message);
           if (error instanceof ComputerOperationError) throw new HttpError(502, error.message);
           throw error;
         }
@@ -204,10 +279,97 @@ export function createHttpServer() {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/activity') {
+        const rawLimit = url.searchParams.get('limit') || '50';
+        if (!/^\d+$/.test(rawLimit)) throw new HttpError(400, '活动条数无效');
+        const limit = Math.min(100, Math.max(1, Number(rawLimit)));
+        const rawBefore = url.searchParams.get('before');
+        let beforeId: number | null = null;
+        if (rawBefore !== null) {
+          if (!eventId.test(rawBefore) || !Number.isSafeInteger(Number(rawBefore))) throw new HttpError(400, '活动游标无效');
+          beforeId = Number(rawBefore);
+        }
+        const rawDebug = url.searchParams.get('debug');
+        if (rawDebug !== null && rawDebug !== '0' && rawDebug !== '1') throw new HttpError(400, '调试模式参数无效');
+        const page = await listRecentActivity(session.tenant.id, beforeId, limit, rawDebug === '1');
+        json(res, 200, page);
+        return;
+      }
+
       if (method === 'POST' && url.pathname === '/api/tasks') {
         requireSameOrigin(req);
         const body = await readJson(req);
-        json(res, 201, { task: await createQueuedRun(session.tenant.id, body.prompt) });
+        const task = await createQueuedRun(session.tenant.id, body.prompt);
+        writeHttpLog('task.queued', 'info', { requestId, tenantId, runId: task.id, threadId: task.threadId });
+        scheduleAgentRun(session.tenant.id);
+        json(res, 201, { task });
+        return;
+      }
+
+      const artifactListRunId = routeRunId(url.pathname, '/artifacts');
+      if (method === 'GET' && artifactListRunId) {
+        const task = await getRunDetail(session.tenant.id, artifactListRunId);
+        if (!task) throw new HttpError(404, '任务不存在');
+        const sandbox = await connectTenantSandbox(session.tenant.id);
+        try {
+          const root = taskWorkspace(task.threadId);
+          const artifacts = await sandbox.files.exists(root) ? await listTaskArtifacts(sandbox.files, root) : [];
+          json(res, 200, { artifacts });
+        } finally { sandbox.close(); }
+        return;
+      }
+
+      const artifactDownloadRunId = routeRunId(url.pathname, '/artifacts/download');
+      if (method === 'GET' && artifactDownloadRunId) {
+        const task = await getRunDetail(session.tenant.id, artifactDownloadRunId);
+        if (!task) throw new HttpError(404, '任务不存在');
+        const relativePath = url.searchParams.get('path') || '';
+        const mode = url.searchParams.get('mode') || 'download';
+        if (mode !== 'download' && mode !== 'preview') throw new HttpError(400, '文件访问模式无效');
+        const root = taskWorkspace(task.threadId);
+        const absolutePath = taskArtifactAbsolutePath(root, relativePath);
+        if (!absolutePath) throw new HttpError(400, '文件路径无效');
+        const sandbox = await connectTenantSandbox(session.tenant.id);
+        try {
+          const artifacts = await sandbox.files.exists(root) ? await listTaskArtifacts(sandbox.files, root) : [];
+          const artifact = artifacts.find(item => item.path === relativePath);
+          if (!artifact) throw new HttpError(404, '任务文件不存在');
+          if (!await artifactStaysInsideTask(sandbox, root, absolutePath)) throw new HttpError(404, '任务文件不存在');
+          if (mode === 'preview' && !artifact.previewable) throw new HttpError(415, '该文件暂不支持预览');
+          const metadata = await sandbox.files.stat(absolutePath);
+          const size = Number(metadata.size ?? artifact.sizeBytes);
+          if (!Number.isSafeInteger(size) || size < 0) throw new HttpError(404, '任务文件不可读取');
+          if (size > maxArtifactDownloadBytes) throw new HttpError(413, '文件超过 100 MiB，暂不支持直接下载');
+          if (mode === 'preview' && size > maxArtifactPreviewBytes) throw new HttpError(413, '文件超过 25 MiB，暂不支持预览');
+          if (String(metadata.type || '').toUpperCase().includes('DIRECTORY')) throw new HttpError(404, '任务文件不存在');
+          const source = await sandbox.files.read(absolutePath, { format: 'stream' });
+          const filename = posix.basename(relativePath);
+          const headers: Record<string, string> = {
+            'content-type': artifact.mediaType.startsWith('text/') || artifact.mediaType === 'application/json' ? `${artifact.mediaType}; charset=utf-8` : artifact.mediaType,
+            'content-length': String(size),
+            'content-disposition': attachmentDisposition(filename, mode === 'preview' ? 'inline' : 'attachment'),
+            'cache-control': 'private, no-store',
+            'x-content-type-options': 'nosniff',
+          };
+          if (mode === 'preview' && artifact.mediaType === 'text/html') {
+            headers['content-security-policy'] = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' blob: data:; style-src 'unsafe-inline' blob: data:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+          }
+          res.writeHead(200, {
+            ...headers,
+          });
+          await pipeline(Readable.fromWeb(source as import('node:stream/web').ReadableStream<Uint8Array>), res);
+        } finally { sandbox.close(); }
+        return;
+      }
+
+      const replyRunId = routeRunId(url.pathname, '/reply');
+      if (method === 'POST' && replyRunId) {
+        requireSameOrigin(req);
+        const body = await readJson(req);
+        const task = await createQueuedReplyRun(session.tenant.id, replyRunId, body.prompt);
+        writeHttpLog('task.reply.queued', 'info', { requestId, tenantId, runId: task.id, threadId: task.threadId, previousRunId: replyRunId });
+        scheduleAgentRun(session.tenant.id);
+        json(res, 201, { task });
         return;
       }
 
@@ -234,16 +396,37 @@ export function createHttpServer() {
       if (method === 'GET' && await serveStatic(url.pathname, res)) return;
       json(res, 404, { error: '页面不存在' });
     } catch (error) {
+      const errorInfo = safeHttpError(error);
+      let failureStatus = error instanceof HttpError ? error.status
+        : error instanceof ComputerNotReadyError ? 409
+          : error instanceof ComputerNotConfiguredError ? 503
+            : 500;
+      const initialMessage = error instanceof Error ? error.message : String(error);
+      if (initialMessage.startsWith('Task must contain')) failureStatus = 400;
+      else if (initialMessage.startsWith('Task cannot be continued')) failureStatus = 409;
+      writeHttpLog('request.failed', failureStatus >= 500 ? 'error' : 'warning', {
+        requestId,
+        tenantId: tenantId || undefined,
+        method,
+        path: url.pathname,
+        status: failureStatus,
+        responseStarted: res.headersSent,
+        ...errorInfo,
+      });
       if (res.headersSent) { res.end(); return; }
       if (error instanceof HttpError) { json(res, error.status, { error: error.message }); return; }
+      if (error instanceof ComputerNotReadyError) { json(res, 409, { error: error.message }); return; }
+      if (error instanceof ComputerNotConfiguredError) { json(res, 503, { error: error.message }); return; }
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith('Task must contain')) { json(res, 400, { error: '请输入 1 到 10000 个字符的任务内容' }); return; }
-      process.stderr.write('Request failed: ' + message.slice(0, 400) + '\n');
+      if (message.startsWith('Task cannot be continued')) { json(res, 409, { error: '该任务仍在运行，或已无法继续。请刷新任务状态后重试。' }); return; }
       json(res, 500, { error: '服务暂时不可用' });
     }
   });
 
   server.on('upgrade', (req, socket, head) => {
+    const requestId = requestIdFor(req);
+    let tenantId = '';
     void (async () => {
       let url: URL;
       try { url = new URL(req.url || '/', 'http://localhost'); }
@@ -257,9 +440,12 @@ export function createHttpServer() {
         return;
       }
       const session = requireSession(await sessionFromRequest(req));
+      tenantId = session.tenant.id;
+      writeHttpLog('desktop.upgrade.start', 'info', { requestId, tenantId, path: url.pathname });
       await proxyDesktopUpgrade(req, socket, head, session.tenant.id, url.pathname, url.search);
     })().catch(error => {
       const status = error instanceof HttpError ? error.status : error instanceof DesktopNotReadyError ? 409 : 502;
+      writeHttpLog('desktop.upgrade.failed', status >= 500 ? 'error' : 'warning', { requestId, tenantId: tenantId || undefined, status, ...safeHttpError(error) });
       const message = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : status === 409 ? 'Conflict' : 'Bad Gateway';
       if (!socket.destroyed) socket.end(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     });
@@ -271,7 +457,7 @@ export function createHttpServer() {
 export function listen(): ReturnType<typeof createHttpServer> {
   const server = createHttpServer();
   server.listen(config.port, config.host, () => {
-    process.stdout.write('Coke Super Agent listening on http://' + config.host + ':' + config.port + '\n');
+    writeHttpLog('server.listening', 'info', { host: config.host, port: config.port });
   });
   return server;
 }

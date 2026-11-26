@@ -1,4 +1,9 @@
 import 'dotenv/config';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const deepseekBaseUrl = (process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/anthropic').trim().replace(/\/+$/, '');
+const piDeepseekBaseUrl = (process.env.CSA_PI_DEEPSEEK_BASE_URL || deepseekBaseUrl.replace(/\/anthropic$/i, '') || 'https://api.deepseek.com').trim().replace(/\/+$/, '');
 
 function positiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -21,11 +26,25 @@ export const config = {
     apiUrl: process.env.CUBE_API_URL || '',
     apiKey: process.env.CUBE_API_KEY || '',
     templateId: process.env.CUBE_TEMPLATE_ID || '',
+    dshTemplateSnapshotId: process.env.CSA_CUBE_DSH_TEMPLATE_SNAPSHOT_ID || '',
     proxyNodeIp: process.env.CUBE_PROXY_NODE_IP || '',
     proxyPort: positiveInt(process.env.CUBE_PROXY_PORT_HTTP, 80),
     proxyScheme: process.env.CUBE_PROXY_SCHEME || 'http',
     sandboxDomain: process.env.CUBE_SANDBOX_DOMAIN || 'cube.app',
     requestTimeoutMs: positiveInt(process.env.CUBE_REQUEST_TIMEOUT_MS, 30_000),
+    workspaceMode: process.env.CSA_CUBE_WORKSPACE_MODE || '',
+    limaCommand: process.env.CSA_LIMACTL || join(homedir(), 'Library/Application Support/Coke Super Agent/lab/lima-2.3.0/bin/limactl'),
+    limaHome: process.env.LIMA_HOME || join(homedir(), '.local/share/csa-cube-node/lima'),
+  },
+  agent: {
+    runtime: (process.env.CSA_AGENT_RUNTIME || 'dsh').trim().toLowerCase(),
+    apiKey: process.env.DEEPSEEK_API_KEY || '',
+    baseUrl: deepseekBaseUrl,
+    piBaseUrl: piDeepseekBaseUrl,
+    model: process.env.DSH_MODEL || '',
+    npmHttpProxy: process.env.CSA_NPM_HTTP_PROXY || (process.platform === 'darwin' ? 'http://127.0.0.1:7890' : ''),
+    desktopAptMirror: process.env.CSA_DESKTOP_APT_MIRROR || '',
+    desktopResolution: process.env.CSA_DESKTOP_RESOLUTION || '1280x800',
   },
 };
 

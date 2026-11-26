@@ -12,17 +12,25 @@
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "start": "tsx src/server/index.ts",
+    "start:web": "vite preview --host 127.0.0.1 --port 5173 --strictPort",
+    "start:web:public": "vite preview --host 127.0.0.1 --port 5174 --strictPort",
+    "start:local": "concurrently -k \"npm:start\" \"npm:start:web\"",
+    "macos:install-public-services": "bash scripts/macos/install-public-services.sh",
     "db:migrate": "tsx src/server/migrate.ts",
     "db:seed": "tsx src/server/seed.ts",
+    "cube:desktop-image": "tsx scripts/cube/build-desktop-image.ts",
     "cube:desktop-template": "tsx scripts/cube/create-desktop-template.ts",
-    "test": "tsx --test src/server/*.test.ts"
+    "cube:prepare-dsh-template": "tsx scripts/cube/prepare-dsh-template.ts",
+    "test": "tsx --test src/server/*.test.ts",
+    "test:public-routing": "node --test tests/public-routing.test.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "0.8.0",
     "dotenv": "^16.6.1",
     "mysql2": "^3.15.3",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "undici": "^6.19.8"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

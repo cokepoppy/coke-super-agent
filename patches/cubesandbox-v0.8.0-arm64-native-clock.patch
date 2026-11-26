@@ -1,0 +1,100 @@
+diff --git a/CubeShim/shim/src/sandbox/sb.rs b/CubeShim/shim/src/sandbox/sb.rs
+--- a/CubeShim/shim/src/sandbox/sb.rs
++++ b/CubeShim/shim/src/sandbox/sb.rs
+@@ -932,3 +932,9 @@
+-        vc.add_cmdline("highres=off".to_string());
+-        vc.add_cmdline("clocksource=kvm-clock".to_string());
++        // These guest clock defaults are for the x86_64 KVM path. ARM64 uses
++        // the architected timer; kvm-clock is unavailable there, and disabling
++        // high-resolution timers leaves Chrome on a 4 ms tick.
++        #[cfg(target_arch = "x86_64")]
++        {
++            vc.add_cmdline("highres=off".to_string());
++            vc.add_cmdline("clocksource=kvm-clock".to_string());
++        }
+         vc.add_cmdline("agent.unified_cgroup_hierarchy=true".to_string());
+@@ -2411,9 +2411,12 @@
+-        let mut set_expect: HashSet<String> = vec![
+-            "highres=off",
+-            "clocksource=kvm-clock",
+-            "agent.unified_cgroup_hierarchy=true",
+-        ]
++        let mut set_expect: HashSet<String> = vec!["agent.unified_cgroup_hierarchy=true"]
+         .into_iter()
+         .map(|s| s.to_string())
+         .collect();
++        if cfg!(target_arch = "x86_64") {
++            set_expect.insert("highres=off".to_string());
++            set_expect.insert("clocksource=kvm-clock".to_string());
++        } else {
++            assert!(!vm_config.cmdlines.contains(&"highres=off".to_string()));
++            assert!(!vm_config.cmdlines.contains(&"clocksource=kvm-clock".to_string()));
++        }
+         let set_unexpect: HashSet<String> = vec!["clocksource=tsc", "tsc=reliable"]
+
+diff --git a/CubeShim/shim/src/snapshot/mod.rs b/CubeShim/shim/src/snapshot/mod.rs
+--- a/CubeShim/shim/src/snapshot/mod.rs
++++ b/CubeShim/shim/src/snapshot/mod.rs
+@@ -44,8 +44,23 @@ pub const P_FORCE: &str = "force";
+ pub const P_FORCE: &str = "force";
+ pub const CUBE_SYS_PATH: &str = "/usr/local/services/cubetoolbox/";
+ pub const FS_SHARE_DIR: &str = "/tmp/snapshot-share-dir";
+ 
++fn add_snapshot_clock_parameters(vm_config: &mut VmConfig, tap: bool) {
++    #[cfg(target_arch = "x86_64")]
++    {
++        if tap {
++            vm_config.add_cmdline("highres=off".to_string());
++            vm_config.add_cmdline("clocksource=kvm-clock".to_string());
++        } else {
++            vm_config.add_cmdline("clocksource=tsc".to_string());
++            vm_config.add_cmdline("tsc=reliable".to_string());
++        }
++    }
++    #[cfg(not(target_arch = "x86_64"))]
++    let _ = (vm_config, tap);
++}
++
+ #[derive(Debug)]
+ pub struct FilePtr {
+     path: String,
+ }
+@@ -273,8 +288,2 @@ impl Snapshot {
+-
+-            //don't disable highres in eks, temporarily use tap to identify this situation
+-            vm_config.add_cmdline("highres=off".to_string());
+-            vm_config.add_cmdline("clocksource=kvm-clock".to_string());
+-        } else {
+-            vm_config.add_cmdline("clocksource=tsc".to_string());
+-            vm_config.add_cmdline("tsc=reliable".to_string());
+-        }
++        }
++        add_snapshot_clock_parameters(&mut vm_config, self.tap);
+@@ -470,1 +479,27 @@ fn clear_dir_contents(path: &Path) -> CResult<()> {
+ }
++
++#[cfg(test)]
++mod clock_parameter_tests {
++    use super::*;
++
++    #[test]
++    fn clock_parameters_are_arch_specific() {
++        for tap in [true, false] {
++            let mut config = VmConfig::default();
++            add_snapshot_clock_parameters(&mut config, tap);
++            let has_param = |param: &str| config.cmdlines.contains(&param.to_string());
++
++            if cfg!(target_arch = "x86_64") {
++                assert_eq!(has_param("highres=off"), tap);
++                assert_eq!(has_param("clocksource=kvm-clock"), tap);
++                assert_eq!(has_param("clocksource=tsc"), !tap);
++                assert_eq!(has_param("tsc=reliable"), !tap);
++            } else {
++                assert!(!has_param("highres=off"));
++                assert!(!has_param("clocksource=kvm-clock"));
++                assert!(!has_param("clocksource=tsc"));
++                assert!(!has_param("tsc=reliable"));
++            }
++        }
++    }
++}

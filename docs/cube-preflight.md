@@ -50,7 +50,7 @@ bash scripts/cube/start-local-node.sh
 "$LIMACTL" shell cube-node -- sudo -n bash -s < scripts/cube/ensure-compose-v2.sh
 ```
 
-数据盘脚本默认只检查。只有确认目标是预期的全新空盘后，才给它传递显式 `--apply` 参数来格式化；不要对已有节点使用该参数。脚本启动前会验证 Lima 版本、独立卷与剩余空间；创建 `cube-xfs` 时只创建空白 raw 盘。CubeSandbox 安装器要求 XFS reflink 和至少 50 GB 数据空间。
+数据盘脚本默认只检查。只有确认目标是预期的全新空盘后，才给它传递显式 `--apply` 参数来格式化；对已有数据盘，脚本只接受已验证的 `CSA_CUBE` XFS，并且 `--apply` 只会补齐挂载、fstab 并执行 XFS 扩展，不会格式化已有 XFS。脚本启动前会验证 Lima 版本、独立卷与剩余空间；新建的 `cube-xfs` raw 盘默认 80 GiB，可用 `CSA_CUBE_DATA_DISK_SIZE=64GiB` 显式创建 64 GiB。现有 64 GiB、80 GiB 和 100 GiB raw 盘都可启动。CubeSandbox 安装器要求 XFS reflink 和至少 50 GB 数据空间。
 
 ## 主机要求
 
@@ -69,7 +69,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/cube -p 'test_
 ## 2026-11-19 M5 本地单节点实测
 
 - MacBook Air M5（Mac17,3）、macOS 26.5.1、16 GiB 内存；Lima 2.3.0 启动 Ubuntu 24.04 minimal ARM64，Linux 内核 6.8.0-147-generic。root 身份打开 /dev/kvm，KVM API 为 12，KVM_CREATE_VM 成功。
-- 新建 64 GiB raw Lima 数据盘，在访客机检查其大小、分区、签名和挂载状态后才格式化。磁盘在客体显示为 /dev/vdb，XFS reflink=1，挂载在 /data/cubelet，可用空间约 63 GiB。
+- 2026-11-19 实测节点使用 64 GiB raw Lima 数据盘；脚本现为新节点默认创建 80 GiB（可用 `CSA_CUBE_DATA_DISK_SIZE=64GiB` 选择 64 GiB）。访客机检查磁盘大小、分区、签名和挂载状态后才格式化。磁盘在客体显示为 /dev/vdb，XFS reflink=1，挂载在 /data/cubelet。
 - TencentCloud CubeSandbox v0.8.0 ARM64 发布包 SHA-256：a7dcf6faa80416aab323050aac275e3385a3f49778a46256715608a26a4cb4f4。Cubelet、CubeMaster、CubeAPI、CubeShim 和 Cube runtime 均验证为 ARM64 ELF。官方安装器 quickcheck 的 Cubelet 网络运行时、Master、TemplateCenter、CubeAPI、CubeOps 检查全部通过。
 - Ubuntu 24.04 上旧版 `docker-compose` 因系统不再提供 Python `distutils`，无法启动 Cube 安装包依赖的 MySQL/Redis 配套容器。安装系统自带的 `docker-compose-v2`，并把兼容命令指向该插件后，单节点安装通过 quickcheck。租户 microVM 的执行仍由 containerd Shim、CubeShim 和 KVM 负责。
 - Lima 使用 192.168.5.0/24，和 CubeSandbox 默认 192.168.0.0/18 重叠。Cube 沙箱网段改成 10.240.0.0/18 后，未关闭上游冲突检查，安装顺利通过。
