@@ -14,6 +14,7 @@ import { pool } from './db.ts';
 import { runGuestPty, stageRuntimeBundle, startGuestPty } from './runtime-bundle.ts';
 import { appendRunTrace, sanitizeRunTrace, transitionRun } from './task-store.ts';
 import { isGuestAgentProcessCommandLine } from './guest-process-identity.ts';
+import { classifyGuestRunRecovery } from './guest-run-recovery.ts';
 
 interface PendingRun extends RowDataPacket {
   id: string;
@@ -231,25 +232,70 @@ async function executeRun(run: PendingRun): Promise<void> {
     if (stopped) return;
 
     const existingState = await readGuestState(sandbox, `${runDirectory}/state.json`);
-    if (existingState) {
-      if (isTerminalGuestState(existingState.status)) {
-        await publishGuestTraces(run, existingState, 0);
-        await persistGuestTerminalState(run, sandbox, existingState);
-        return;
-      }
-      if (existingState.status === 'working') {
-        const launcherPid = Number((await sandbox.files.read(`${runDirectory}/launcher.pid`).catch(() => '')).trim());
-        if (Number.isSafeInteger(existingState.pid) && await guestProcessIsAlive(sandbox, existingState.pid!, run.id) &&
-          Number.isSafeInteger(launcherPid) && launcherPid > 0) {
-          try {
-            const guestHandle = await sandbox.pty.connect(launcherPid, { timeoutMs: 0 });
-            await monitorGuestRun(sandbox, run, existingState, runDirectory, guestHandle);
-            return;
-          } catch { /* Do not replay a task whose process identity could not be reattached. */ }
+    const launcherPath = `${runDirectory}/launcher.pid`;
+    const launcherMarkerExists = await sandbox.files.exists(launcherPath);
+    const recoveryDecision = classifyGuestRunRecovery(existingState, launcherMarkerExists);
+    await trace(run, {
+      component: 'agent-runtime',
+      stage: 'guest.recovery.inspect',
+      level: recoveryDecision === 'fail-closed' ? 'warning' : 'info',
+      message: '检查 microVM 中已持久化的 Agent 状态，决定恢复、提交结果或启动新进程。',
+      details: {
+        decision: recoveryDecision,
+        statePresent: existingState !== null,
+        stateStatus: existingState?.status || null,
+        guestPidPresent: Number.isSafeInteger(existingState?.pid),
+        launcherMarkerExists,
+      },
+    });
+    if (recoveryDecision === 'persist-terminal' && existingState) {
+      await publishGuestTraces(run, existingState, 0);
+      await trace(run, { component: 'agent-runtime', stage: 'guest.recovery.terminal-state', level: 'info', message: 'guest 已写入最终状态；恢复器直接提交该结果，不会重新运行任务。', details: { status: existingState.status ?? null } });
+      await persistGuestTerminalState(run, sandbox, existingState);
+      return;
+    }
+    if (recoveryDecision === 'resume' && existingState) {
+      const launcherPidValue = Number((await sandbox.files.read(launcherPath).catch(() => '')).trim());
+      const launcherPidValid = Number.isSafeInteger(launcherPidValue) && launcherPidValue > 0;
+      const agentProcessMatches = Number.isSafeInteger(existingState.pid)
+        ? await guestProcessIsAlive(sandbox, existingState.pid!, run.id)
+        : false;
+      await trace(run, {
+        component: 'agent-runtime',
+        stage: 'guest.recovery.process.inspect',
+        level: agentProcessMatches && launcherPidValid ? 'info' : 'warning',
+        message: '核对 guest Agent PID、任务身份和可重新连接的 PTY launcher。',
+        details: {
+          agentPidPresent: Number.isSafeInteger(existingState.pid),
+          agentProcessMatches,
+          launcherPidValid,
+        },
+      });
+      let guestHandle: PtyHandle | undefined;
+      if (agentProcessMatches && launcherPidValid) {
+        const reconnectStartedAt = Date.now();
+        await trace(run, { component: 'agent-runtime', stage: 'guest.pty.reconnect.start', level: 'info', message: '正在重新连接仍在运行的 microVM Agent PTY。' });
+        try {
+          guestHandle = await sandbox.pty.connect(launcherPidValue, { timeoutMs: 0 });
+          await trace(run, { component: 'agent-runtime', stage: 'guest.pty.reconnect.complete', level: 'info', message: '已重新连接 microVM Agent PTY，将继续监听原任务，不会启动第二个 Agent 进程。', durationMs: Date.now() - reconnectStartedAt });
+        } catch (error) {
+          await trace(run, { component: 'agent-runtime', stage: 'guest.pty.reconnect.failed', level: 'warning', message: '无法重新连接仍在运行的 Agent PTY。', durationMs: Date.now() - reconnectStartedAt, details: runtimeErrorDetails(error) });
         }
-        await transitionRun(run.tenant_id, run.id, 'failed', 'failed', 'microVM 中的 Agent 进程已中断，外部操作结果需要核实；为避免重复操作，任务没有自动重放。可以在同一对话中继续。');
+      }
+      if (guestHandle) {
+        await monitorGuestRun(sandbox, run, existingState, runDirectory, guestHandle);
         return;
       }
+      const message = 'microVM 中仍有未完成的 Agent 状态，但无法验证或重新连接原进程；外部操作结果需要核实。为避免重复操作，任务没有自动重放。可以在同一对话中继续。';
+      await trace(run, { component: 'agent-runtime', stage: 'guest.recovery.abandoned', level: 'error', message: '原 Agent 进程无法安全恢复，停止自动重放。' });
+      await transitionRun(run.tenant_id, run.id, 'failed', 'failed', message);
+      return;
+    }
+    if (recoveryDecision === 'fail-closed') {
+      const message = 'microVM 中的任务状态不完整或无法识别；外部操作结果需要核实。为避免重复操作，任务没有自动重放。可以在同一对话中继续。';
+      await trace(run, { component: 'agent-runtime', stage: 'guest.recovery.uncertain', level: 'error', message: 'guest 状态与 launcher 标记不一致，无法证明任务尚未开始；停止自动重放。' });
+      await transitionRun(run.tenant_id, run.id, 'failed', 'failed', message);
+      return;
     }
 
     await sandbox.files.write(join(runDirectory, 'input.json'), JSON.stringify({ threadId: run.thread_id, prompt: run.prompt, baseUrl: runtimeEngine === 'pi' ? config.agent.piBaseUrl : model.baseUrl, model: model.model }));
