@@ -407,7 +407,7 @@ async function assertExistingSandbox(tenantId: string, cube: Config): Promise<vo
 async function probeTenantDesktop(tenantId: string, sandboxId: string, generation: number, trace?: TraceSink, runId?: string): Promise<boolean> {
   const startedAt = Date.now();
   let sandbox: Sandbox | undefined;
-  await emitTrace(trace, { component: 'desktop', stage: 'health.probe.start', level: 'info', message: '在访客机内检查桌面会话、X11、VNC 与 WebSocket 转发。', details: { sandboxId, generation, timeoutMs: 15_000 } }, tenantId, runId);
+  await emitTrace(trace, { component: 'desktop', stage: 'health.probe.start', level: 'info', message: '通过访客机文件接口检查 X11 socket、桌面会话进程及 VNC/noVNC 监听端口。', details: { sandboxId, generation, timeoutMs: 15_000 } }, tenantId, runId);
   try {
     sandbox = await connectTenantSandbox(tenantId);
     if (sandbox.sandboxId !== sandboxId) {
@@ -416,7 +416,7 @@ async function probeTenantDesktop(tenantId: string, sandboxId: string, generatio
     }
     const result = await probeDesktopReadiness(sandbox);
     const healthy = result.ready;
-    await emitTrace(trace, { component: 'desktop', stage: healthy ? 'health.probe.complete' : 'health.probe.unhealthy', level: healthy ? 'info' : 'error', message: healthy ? '访客机桌面会话、X11、VNC 和 WebSocket 转发均可用。' : '访客机实时桌面健康探测失败。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...result } }, tenantId, runId);
+    await emitTrace(trace, { component: 'desktop', stage: healthy ? 'health.probe.complete' : 'health.probe.unhealthy', level: healthy ? 'info' : 'error', message: healthy ? '访客机桌面会话、X11 socket、VNC 监听端口和 noVNC WebSocket 监听端口均可用。' : '访客机实时桌面健康探测失败。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...result } }, tenantId, runId);
     return healthy;
   } catch (error) {
     await emitTrace(trace, { component: 'desktop', stage: 'health.probe.failed', level: 'error', message: '通过 CubeSandbox 数据面执行访客机实时桌面探测失败。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
@@ -490,25 +490,21 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
     let lastHeartbeatAt = Date.now();
     let lastStatus = '';
     while (Date.now() < deadline) {
-      const markers = await sandbox.commands.run(String.raw`
-        ready=0; exit_code=none
-        if [ -s /var/lib/csa-desktop/ready ]; then ready=1; fi
-        if [ -s /var/lib/csa-desktop/bootstrap.exitcode ]; then
-          exit_code="$(head -c 16 /var/lib/csa-desktop/bootstrap.exitcode)"
-        fi
-        printf 'bootstrap_markers ready=%s exit_code=%s\n' "$ready" "$exit_code"
-      `, { timeoutMs: 15_000 });
-      const marker = markers.stdout.match(/^bootstrap_markers ready=([01]) exit_code=(none|\d{1,3})$/m);
-      if (markers.exitCode !== 0 || !marker) throw new Error('Linux desktop bootstrap did not return a valid status marker.');
+      const [readyMarker, exitCodeMarker] = await Promise.all([
+        readDesktopGuestFile(sandbox, '/var/lib/csa-desktop/ready'),
+        readDesktopGuestFile(sandbox, '/var/lib/csa-desktop/bootstrap.exitcode'),
+      ]);
+      const markerReady = readyMarker.trim().length > 0;
+      const markerExitCode = exitCodeMarker.trim().match(/^\d{1,3}$/)?.[0] ?? 'none';
       let currentStatus = 'INSTALLING';
-      if (marker[1] === '1') {
+      if (markerReady) {
         const readiness = await probeDesktopReadiness(sandbox);
         currentStatus = readiness.ready ? 'READY' : 'READY_MARKER_STALE';
         if (currentStatus !== lastStatus || Date.now() - lastHeartbeatAt >= 30_000) {
-          await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.readiness.probe', level: readiness.ready ? 'info' : 'warning', message: readiness.ready ? '访客机的桌面会话、X11、VNC 和 WebSocket 转发已通过探测。' : '访客机的桌面就绪标记与实时探测不一致。', details: { sandboxId, generation, ...readiness } }, tenantId, runId);
+          await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.readiness.probe', level: readiness.ready ? 'info' : 'warning', message: readiness.ready ? '访客机的桌面会话、X11 socket、VNC 监听端口和 noVNC WebSocket 监听端口已通过探测。' : '访客机的桌面就绪标记与实时探测不一致。', details: { sandboxId, generation, ...readiness } }, tenantId, runId);
         }
       }
-      if (marker[2] !== 'none' && currentStatus !== 'READY') currentStatus = `EXIT:${marker[2]}`;
+      if (markerExitCode !== 'none' && currentStatus !== 'READY') currentStatus = `EXIT:${markerExitCode}`;
       if (currentStatus !== lastStatus) {
         lastStatus = currentStatus;
         await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.status', level: currentStatus.startsWith('EXIT:') ? 'error' : 'info', message: '桌面初始化状态有变化。', details: { sandboxId, generation, status: currentStatus } }, tenantId, runId);
@@ -669,45 +665,65 @@ function withTrafficToken(sandbox: Sandbox, trafficToken: string): Sandbox {
 }
 
 async function probeDesktopReadiness(sandbox: Sandbox) {
-  const command = String.raw`
-    set +e
-    listeners="$(awk '$4 == "0A" {
-      split($2, endpoint, ":")
-      port = toupper(endpoint[2])
-      if (port == "17C0") websockify = 1
-      if (port == "170C") vnc = 1
-    } END { printf "%d:%d", websockify, vnc }' /proc/net/tcp /proc/net/tcp6 2>/dev/null)"
-    x11=0
-    if [ -S /tmp/.X11-unix/X1 ] && timeout --kill-after=1s 3s xdpyinfo -display :1 >/dev/null 2>&1; then x11=1; fi
-    session=0
-    pid="$(cat /run/csa-desktop/session.pid 2>/dev/null)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null \
-      && grep -Fxq "pid=$pid" /run/csa-desktop/session.ready \
-      && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q csa-desktop-session; then
-      session=1
-    fi
-    browser="$(head -c 16 /run/csa-desktop/browser.status 2>/dev/null)"
-    case "$browser" in starting|ready|failed) ;; *) browser=unknown ;; esac
-    printf 'desktop_local_probe listeners=%s x11=%s session=%s browser=%s\n' "$listeners" "$x11" "$session" "$browser"
-  `;
-  const result = await sandbox.commands.run(command, { timeoutMs: 15_000 });
-  const match = result.stdout.match(/^desktop_local_probe listeners=([01]):([01]) x11=([01]) session=([01]) browser=(starting|ready|failed|unknown)$/m);
-  if (result.exitCode !== 0 || !match) throw new Error('The guest did not return a valid desktop readiness result.');
-  const [, websockify, vnc, x11, session, browser] = match;
+  const [tcp, tcp6, sessionPidText, sessionReady, browserText, x11SocketExists] = await Promise.all([
+    readDesktopGuestFile(sandbox, '/proc/net/tcp'),
+    readDesktopGuestFile(sandbox, '/proc/net/tcp6'),
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/session.pid'),
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/session.ready'),
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/browser.status'),
+    sandbox.files.exists('/tmp/.X11-unix/X1').catch(() => false),
+  ]);
+  const listeners = parseDesktopTcpListeners([tcp, tcp6]);
+  const sessionPid = Number(sessionPidText.trim());
+  const sessionPidValid = Number.isSafeInteger(sessionPid) && sessionPid > 1;
+  const sessionCmdline = sessionPidValid
+    ? await readDesktopGuestFile(sandbox, `/proc/${sessionPid}/cmdline`)
+    : '';
+  const session = sessionPidValid
+    && sessionReady.split(/\r?\n/).some(line => line === `pid=${sessionPid}`)
+    && sessionCmdline.includes('csa-desktop-session');
+  const browserCandidate = browserText.trim().slice(0, 16);
+  const browser = browserCandidate === 'starting' || browserCandidate === 'ready' || browserCandidate === 'failed'
+    ? browserCandidate
+    : 'unknown';
+  const websockify = listeners.has(6080);
+  const vnc = listeners.has(5900);
   return {
-    ready: websockify === '1' && vnc === '1' && x11 === '1' && session === '1',
-    websockifyReady: websockify === '1',
-    vncReady: vnc === '1',
-    x11Ready: x11 === '1',
-    sessionReady: session === '1',
+    ready: websockify && vnc && x11SocketExists && session,
+    websockifyReady: websockify,
+    vncReady: vnc,
+    x11Ready: x11SocketExists,
+    sessionReady: session,
     browserStatus: browser,
   };
 }
 
+function parseDesktopTcpListeners(tables: string[]): Set<number> {
+  const ports = new Set<number>();
+  for (const table of tables) {
+    for (const line of table.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns[3] !== '0A') continue;
+      const portHex = columns[1]?.split(':').at(-1);
+      const port = portHex ? Number.parseInt(portHex, 16) : Number.NaN;
+      if (Number.isInteger(port)) ports.add(port);
+    }
+  }
+  return ports;
+}
+
+async function readDesktopGuestFile(sandbox: Sandbox, path: string): Promise<string> {
+  try {
+    return await sandbox.files.read(path);
+  } catch {
+    return '';
+  }
+}
+
 async function readGuestTail(sandbox: Sandbox, path: string, limit = 2_400): Promise<string> {
   try {
-    const result = await sandbox.commands.run(`tail -c ${limit} -- '${path}' 2>/dev/null`, { timeoutMs: 10_000 });
-    return result.exitCode === 0 ? result.stdout.slice(-limit) : '';
+    const contents = Buffer.from(await sandbox.files.read(path, { format: 'bytes' }));
+    return contents.subarray(Math.max(0, contents.length - limit)).toString('utf8');
   } catch {
     return '';
   }
@@ -831,18 +847,7 @@ export async function getTenantBrowserState(tenantId: string): Promise<BrowserSt
   }
   const sandbox = await connectSandboxWithCredential(credential);
   try {
-    const result = await sandbox.commands.run(String.raw`
-      pid="$(cat /run/csa-desktop/session.pid 2>/dev/null)"
-      if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null \
-        && grep -Fxq "pid=$pid" /run/csa-desktop/session.ready \
-        && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q csa-desktop-session; then
-        status="$(head -c 16 /run/csa-desktop/browser.status 2>/dev/null)"
-        case "$status" in starting|ready|failed) printf '%s\n' "$status"; exit 0 ;; esac
-      fi
-      printf 'unknown\n'
-    `, { timeoutMs: 10_000 });
-    const value = result.stdout.trim();
-    return result.exitCode === 0 && (value === 'starting' || value === 'ready' || value === 'failed') ? value : 'unknown';
+    return await readTenantBrowserState(sandbox);
   } finally {
     sandbox.close();
   }
@@ -852,21 +857,29 @@ export async function retryTenantBrowser(tenantId: string): Promise<boolean> {
   const credential = await getTenantDesktopCredential(tenantId);
   const sandbox = await connectSandboxWithCredential(credential);
   try {
-    const result = await sandbox.commands.run(String.raw`
-      pid="$(cat /run/csa-desktop/session.pid 2>/dev/null)"
-      if [[ "$pid" =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null \
-        && grep -Fxq "pid=$pid" /run/csa-desktop/session.ready \
-        && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q csa-desktop-session \
-        && [ "$(head -c 16 /run/csa-desktop/browser.status 2>/dev/null)" = failed ]; then
-        : > /run/csa-desktop/browser.retry
-        printf 'retry-queued\n'
-      else
-        printf 'not-failed-or-session-unavailable\n'
-      fi
-    `, { timeoutMs: 10_000 });
-    if (result.exitCode !== 0) throw new Error('无法向租户桌面发送浏览器重试请求。');
-    return result.stdout.trim() === 'retry-queued';
+    if (await readTenantBrowserState(sandbox) !== 'failed') return false;
+    await sandbox.files.write('/run/csa-desktop/browser.retry', 'retry\n');
+    return true;
   } finally {
     sandbox.close();
   }
+}
+
+async function readTenantBrowserState(sandbox: Sandbox): Promise<BrowserState> {
+  const [pidText, sessionReady, statusText] = await Promise.all([
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/session.pid'),
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/session.ready'),
+    readDesktopGuestFile(sandbox, '/run/csa-desktop/browser.status'),
+  ]);
+  const pid = Number(pidText.trim());
+  if (!Number.isSafeInteger(pid) || pid <= 1) return 'unknown';
+  const [cmdline, processStatus] = await Promise.all([
+    readDesktopGuestFile(sandbox, `/proc/${pid}/cmdline`),
+    readDesktopGuestFile(sandbox, `/proc/${pid}/status`),
+  ]);
+  if (!sessionReady.split(/\r?\n/).some(line => line === `pid=${pid}`)
+    || !cmdline.includes('csa-desktop-session')
+    || /^State:\s+Z/m.test(processStatus)) return 'unknown';
+  const status = statusText.trim().slice(0, 16);
+  return status === 'starting' || status === 'ready' || status === 'failed' ? status : 'unknown';
 }

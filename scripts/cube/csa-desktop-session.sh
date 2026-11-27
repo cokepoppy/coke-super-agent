@@ -814,6 +814,9 @@ browser_status=
 browser_was_ready=0
 browser_restart_attempted=0
 browser_probe_failures=0
+display_probe_failures=0
+display_probe_timeout_seconds=10
+display_probe_failure_limit=4
 
 set_browser_status() {
   local status="$1" level=info
@@ -840,6 +843,13 @@ launch_chrome_with_probe() {
 launch_chrome_with_probe
 
 while true; do
+  if [[ -n "$xvfb_pid" ]] && ! process_is_alive "$xvfb_pid"; then
+    component_exit=unknown
+    wait "$xvfb_pid" 2>/dev/null || component_exit=$?
+    log_event error "display.server.exited pid=$xvfb_pid exit_status=$component_exit"
+    echo "X11 server exited (pid=$xvfb_pid, status=$component_exit)" >&2
+    exit 1
+  fi
   for pid in "$xfce_pid" "$vnc_pid" "$websockify_pid"; do
     if ! process_is_alive "$pid"; then
       component_exit=unknown
@@ -849,9 +859,20 @@ while true; do
       exit 1
     fi
   done
-  if ! timeout --kill-after=1s 4s xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
-    log_event error "display.health.failed display=$DISPLAY action=exit"
-    exit 1
+  if timeout --kill-after=1s "${display_probe_timeout_seconds}s" xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+    if ((display_probe_failures > 0)); then
+      log_event info "display.health.recovered display=$DISPLAY previous_failures=$display_probe_failures"
+    fi
+    display_probe_failures=0
+  else
+    display_probe_failures=$((display_probe_failures + 1))
+    if ((display_probe_failures == 1 || display_probe_failures % 2 == 0)); then
+      log_event warning "display.health.probe.failed display=$DISPLAY timeout_seconds=$display_probe_timeout_seconds failures=$display_probe_failures limit=$display_probe_failure_limit"
+    fi
+    if ((display_probe_failures >= display_probe_failure_limit)); then
+      log_event error "display.health.failed display=$DISPLAY action=exit timeout_seconds=$display_probe_timeout_seconds failures=$display_probe_failures"
+      exit 1
+    fi
   fi
   if [[ -e "$browser_retry_file" ]]; then
     rm -f -- "$browser_retry_file"
