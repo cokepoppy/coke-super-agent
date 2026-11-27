@@ -51,6 +51,8 @@ export async function listTaskArtifacts(filesystem: ArtifactFilesystem, taskRoot
       const name = safeEntryName(entry.name);
       if (!name) continue;
       const type = String(entry.type || '').toUpperCase();
+      // Check links before directories so a directory symlink is never walked.
+      if (type.includes('SYMLINK') || type.includes('LINK')) continue;
       const isDirectory = type.includes('DIRECTORY') || entry.isDirectory === true || entry.isDir === true;
       const relativePath = relativeDirectory ? posix.join(relativeDirectory, name) : name;
       if (isDirectory) {

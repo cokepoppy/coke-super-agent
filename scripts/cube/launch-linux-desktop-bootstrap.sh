@@ -133,7 +133,9 @@ if [[ -f "$state_dir/ready" || -s "$session_pid_file" || -e "$session_lock_file"
         log_event error "stale-session.lock.directory.failed reason=desktop-gid-unavailable uid=$desktop_uid"
         exit 1
       fi
+      log_event stale-session.lock.directory.ensure.start "path=$(dirname "$session_lock_file") uid=$desktop_uid gid=$desktop_gid"
       install -d -o "$desktop_uid" -g "$desktop_gid" -m 0755 "$(dirname "$session_lock_file")"
+      log_event stale-session.lock.directory.ensure.complete "path=$(dirname "$session_lock_file")"
       if [[ -L "$session_lock_file" || (-e "$session_lock_file" && ! -f "$session_lock_file") ]]; then
         log_event error "stale-session.lock.path.invalid path=$session_lock_file type=not-regular-file"
         exit 1
@@ -142,17 +144,21 @@ if [[ -f "$state_dir/ready" || -s "$session_pid_file" || -e "$session_lock_file"
         (umask 077; : >"$session_lock_file")
         log_event stale-session.lock.file.created "path=$session_lock_file uid=$desktop_uid gid=$desktop_gid"
       fi
+      log_event stale-session.lock.metadata.ensure.start "path=$session_lock_file uid=$desktop_uid gid=$desktop_gid mode=0600"
       chown "$desktop_uid:$desktop_gid" "$session_lock_file"
       chmod 0600 "$session_lock_file"
-      while read -r candidate; do
+      log_event stale-session.lock.metadata.ensure.complete "path=$session_lock_file"
+      process_scan_started=$SECONDS
+      process_scan_count=0
+      log_event stale-session.scan.start "uid=$desktop_uid source=ps-pid-and-args"
+      while read -r candidate candidate_command; do
         [[ "$candidate" =~ ^[0-9]+$ ]] || continue
-        candidate_uid="$(awk '/^Uid:/ {print $2; exit}' "/proc/$candidate/status" 2>/dev/null || true)"
-        [[ "$candidate_uid" == "$desktop_uid" ]] || continue
-        candidate_command="$(tr '\0' ' ' <"/proc/$candidate/cmdline" 2>/dev/null || true)"
+        process_scan_count=$((process_scan_count + 1))
         case "$candidate_command" in
           *"/usr/local/bin/csa-desktop-session"*|*"/tmp/csa-desktop-session.sh"*) add_session_pid "$candidate" ;;
         esac
-      done < <(ps -u "$desktop_uid" -o pid= 2>/dev/null)
+      done < <(ps -u "$desktop_uid" -o pid=,args= 2>/dev/null)
+      log_event stale-session.scan.complete "uid=$desktop_uid scanned=$process_scan_count matches=${session_pid_candidates// /,} elapsed_seconds=$((SECONDS - process_scan_started))"
     fi
 
     if [[ -n "$session_pid_candidates" ]]; then
@@ -192,32 +198,34 @@ if [[ -f "$state_dir/ready" || -s "$session_pid_file" || -e "$session_lock_file"
 
     lock_holder_pids=""
     if [[ "$desktop_uid" =~ ^[0-9]+$ ]]; then
+      log_event stale-session.lock-holder.scan.start "uid=$desktop_uid fd=9"
       for lock_fd in /proc/[0-9]*/fd/9; do
         [[ -e "$lock_fd" ]] || continue
-        [[ "$(readlink "$lock_fd" 2>/dev/null || true)" == "$session_lock_file" ]] || continue
-        lock_pid="$(basename "$(dirname "$(dirname "$lock_fd")")")"
+        [[ "$lock_fd" -ef "$session_lock_file" ]] || continue
+        lock_pid="${lock_fd#/proc/}"
+        lock_pid="${lock_pid%%/*}"
         lock_uid="$(awk '/^Uid:/ {print $2; exit}' "/proc/$lock_pid/status" 2>/dev/null || true)"
         [[ "$lock_uid" == "$desktop_uid" ]] || continue
         case " $lock_holder_pids " in *" $lock_pid "*) continue ;; esac
         lock_holder_pids+=" $lock_pid"
       done
+      log_event stale-session.lock-holder.scan.complete "uid=$desktop_uid pids=${lock_holder_pids// /,}"
     fi
     if [[ -n "$lock_holder_pids" ]]; then
       log_event stale-session.lock-holder.scan "pids=${lock_holder_pids// /,} uid=$desktop_uid fd=9 lock_file=$session_lock_file"
       for lock_pid in $lock_holder_pids; do
         lock_uid="$(awk '/^Uid:/ {print $2; exit}' "/proc/$lock_pid/status" 2>/dev/null || true)"
-        lock_target="$(readlink "/proc/$lock_pid/fd/9" 2>/dev/null || true)"
-        if [[ "$lock_uid" != "$desktop_uid" || "$lock_target" != "$session_lock_file" ]]; then
+        if [[ "$lock_uid" != "$desktop_uid" ]] || ! [[ "/proc/$lock_pid/fd/9" -ef "$session_lock_file" ]]; then
           log_event stale-session.lock-holder.stop.skipped "reason=fd-or-uid-identity-changed pid=$lock_pid"
           continue
         fi
         log_event stale-session.lock-holder.stop.start "pid=$lock_pid uid=$lock_uid fd=9"
         kill -TERM "$lock_pid" 2>/dev/null || true
         for attempt in $(seq 1 20); do
-          [[ "$(readlink "/proc/$lock_pid/fd/9" 2>/dev/null || true)" == "$session_lock_file" ]] || break
+          [[ "/proc/$lock_pid/fd/9" -ef "$session_lock_file" ]] || break
           sleep 0.25
         done
-        if [[ "$(readlink "/proc/$lock_pid/fd/9" 2>/dev/null || true)" == "$session_lock_file" ]]; then
+        if [[ "/proc/$lock_pid/fd/9" -ef "$session_lock_file" ]]; then
           lock_uid="$(awk '/^Uid:/ {print $2; exit}' "/proc/$lock_pid/status" 2>/dev/null || true)"
           [[ "$lock_uid" == "$desktop_uid" ]] && kill -KILL "$lock_pid" 2>/dev/null || true
         fi

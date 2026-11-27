@@ -158,14 +158,6 @@ function taskWorkspace(threadId: string): string {
   return posix.join('/workspace/tasks', threadId);
 }
 
-async function artifactStaysInsideTask(sandbox: Awaited<ReturnType<typeof connectTenantSandbox>>, root: string, absolutePath: string): Promise<boolean> {
-  const rootArg = Buffer.from(root).toString('base64');
-  const pathArg = Buffer.from(absolutePath).toString('base64');
-  const command = `/usr/bin/python3 -c 'import base64,os,sys; root=base64.b64decode(sys.argv[1]).decode(); target=base64.b64decode(sys.argv[2]).decode(); resolved_root=os.path.realpath(root); resolved_target=os.path.realpath(target); print("ok" if resolved_root == root and resolved_target == target and os.path.commonpath((root,resolved_target)) == root and os.path.isfile(resolved_target) else "missing")' '${rootArg}' '${pathArg}'`;
-  const result = await sandbox.commands.run(command, { timeoutMs: 10_000 });
-  return result.exitCode === 0 && result.stdout.trim() === 'ok';
-}
-
 function attachmentDisposition(filename: string, disposition: 'attachment' | 'inline' = 'attachment'): string {
   const fallback = filename.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'download';
   const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, character => '%' + character.charCodeAt(0).toString(16).toUpperCase());
@@ -331,12 +323,25 @@ export function createHttpServer() {
         if (!absolutePath) throw new HttpError(400, '文件路径无效');
         const sandbox = await connectTenantSandbox(session.tenant.id);
         try {
+          const artifactListStartedAt = Date.now();
           const artifacts = await sandbox.files.exists(root) ? await listTaskArtifacts(sandbox.files, root) : [];
           const artifact = artifacts.find(item => item.path === relativePath);
+          writeHttpLog('artifact.download.list.complete', 'info', {
+            requestId, tenantId, runId: artifactDownloadRunId,
+            artifactCount: artifacts.length, artifactFound: Boolean(artifact),
+            durationMs: Date.now() - artifactListStartedAt,
+          });
           if (!artifact) throw new HttpError(404, '任务文件不存在');
-          if (!await artifactStaysInsideTask(sandbox, root, absolutePath)) throw new HttpError(404, '任务文件不存在');
           if (mode === 'preview' && !artifact.previewable) throw new HttpError(415, '该文件暂不支持预览');
+          const artifactStatStartedAt = Date.now();
           const metadata = await sandbox.files.stat(absolutePath);
+          const fileType = String(metadata.type || '').toUpperCase();
+          writeHttpLog('artifact.download.stat.complete', fileType === 'FILE_TYPE_FILE' ? 'info' : 'warning', {
+            requestId, tenantId, runId: artifactDownloadRunId,
+            fileType: fileType || 'unknown',
+            durationMs: Date.now() - artifactStatStartedAt,
+          });
+          if (fileType !== 'FILE_TYPE_FILE') throw new HttpError(404, '任务文件不存在');
           const size = Number(metadata.size ?? artifact.sizeBytes);
           if (!Number.isSafeInteger(size) || size < 0) throw new HttpError(404, '任务文件不可读取');
           if (size > maxArtifactDownloadBytes) throw new HttpError(413, '文件超过 100 MiB，暂不支持直接下载');
@@ -354,10 +359,16 @@ export function createHttpServer() {
           if (mode === 'preview' && artifact.mediaType === 'text/html') {
             headers['content-security-policy'] = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline' blob: data:; style-src 'unsafe-inline' blob: data:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
           }
+          writeHttpLog('artifact.download.read.start', 'info', {
+            requestId, tenantId, runId: artifactDownloadRunId, mode, mediaType: artifact.mediaType, sizeBytes: size,
+          });
           res.writeHead(200, {
             ...headers,
           });
           await pipeline(Readable.fromWeb(source as import('node:stream/web').ReadableStream<Uint8Array>), res);
+          writeHttpLog('artifact.download.complete', 'info', {
+            requestId, tenantId, runId: artifactDownloadRunId, mode, sizeBytes: size,
+          });
         } finally { sandbox.close(); }
         return;
       }
