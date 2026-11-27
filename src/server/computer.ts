@@ -79,6 +79,7 @@ export class ComputerOperationError extends Error {}
 export class ComputerRecoveryRequiredError extends ComputerOperationError {}
 export class ComputerNotReadyError extends Error {}
 export class DesktopNotReadyError extends ComputerNotReadyError {}
+class DesktopBootstrapLeaseLostError extends Error {}
 
 const missingSandboxMessage = '原租户 microVM 不存在，工作区可能需要恢复。已保留原电脑记录，未创建空白电脑。';
 const uncertainCreateMessage = '上次 microVM 创建结果尚未确认。为保护租户工作区，已暂停重复创建，请先核对 Cube 控制面。';
@@ -428,9 +429,20 @@ async function probeTenantDesktop(tenantId: string, sandboxId: string, generatio
 
 async function runDesktopBootstrap(tenantId: string, sandboxId: string, generation: number, trafficTokenCiphertext: string, trace?: TraceSink, runId?: string): Promise<void> {
   let sandbox: Sandbox | undefined;
+  let leaseConnection: PoolConnection | undefined;
+  let leaseAcquired = false;
+  const leaseName = `csa-desktop:${tenantId}`;
   const startedAt = Date.now();
   try {
     await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.start', level: 'info', message: '开始准备 XFCE、Chromium、Node.js、Python 与 noVNC。', details: { sandboxId, generation, timeoutMs: desktopBootstrapTimeoutMs } }, tenantId, runId);
+    leaseConnection = await pool.getConnection();
+    const [leaseRows] = await leaseConnection.execute<RowDataPacket[]>('SELECT GET_LOCK(?, 0) AS acquired', [leaseName]);
+    if (Number(leaseRows[0]?.acquired) !== 1) {
+      await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.lease.busy', level: 'info', message: '同一租户与 generation 的桌面引导已由另一个应用进程持有。', details: { sandboxId, generation } }, tenantId, runId);
+      return;
+    }
+    leaseAcquired = true;
+    await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.lease.acquired', level: 'info', message: '已取得 MySQL 单租户桌面引导租约。', details: { sandboxId, generation } }, tenantId, runId);
     const deadline = Date.now() + desktopBootstrapTimeoutMs;
     const connected = await connectSandboxForDesktopBootstrap(sandboxId, cubeConfig(), deadline, trace, tenantId, runId);
     sandbox = connected.trafficAccessToken
@@ -522,6 +534,7 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
         throw new Error(`Linux desktop bootstrap exited ${exitCode}${detail ? ': ' + detail : ''}`);
       }
       if (Date.now() - lastHeartbeatAt >= 30_000) {
+        await assertDesktopBootstrapLease(leaseConnection, leaseName);
         const guestStatus = await readGuestTail(sandbox!, '/var/lib/csa-desktop/bootstrap.status', 2_400);
         await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.wait', level: 'info', message: '桌面初始化仍在运行；已从访客机状态文件读取最近阶段与 apt 心跳。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000), guestStatus } }, tenantId, runId);
         lastHeartbeatAt = Date.now();
@@ -529,6 +542,7 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
       await new Promise(resolve => setTimeout(resolve, 5_000));
     }
     if (Date.now() >= deadline) throw new Error('Linux desktop bootstrap exceeded the 30 minute wait limit.');
+    await assertDesktopBootstrapLease(leaseConnection, leaseName);
     const [updated] = await pool.execute(
       "UPDATE computers SET desktop_state = 'ready', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND desktop_state = 'installing'",
       [tenantId, sandboxId, generation],
@@ -536,17 +550,51 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
     if ((updated as { affectedRows: number }).affectedRows !== 1) throw new Error('Linux desktop generation changed during bootstrap.');
     await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.ready', level: 'info', message: 'XFCE 桌面及 noVNC 服务已启动。', durationMs: Date.now() - startedAt, details: { sandboxId, generation } }, tenantId, runId);
   } catch (error) {
-    await pool.execute(
-      "UPDATE computers SET desktop_state = 'failed', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND desktop_state = 'installing'",
-      [tenantId, sandboxId, generation],
-    ).catch(() => undefined);
+    if (!(error instanceof DesktopBootstrapLeaseLostError)) {
+      await pool.execute(
+        "UPDATE computers SET desktop_state = 'failed', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND desktop_state = 'installing'",
+        [tenantId, sandboxId, generation],
+      ).catch(() => undefined);
+    }
     const reason = error instanceof Error ? error.message.slice(0, 500) : 'unknown error';
     const safeReason = config.cube.apiKey ? reason.replaceAll(config.cube.apiKey, '[redacted]') : reason;
-    await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.error', level: 'error', message: 'Linux 桌面初始化失败。', durationMs: Date.now() - startedAt, details: { safeError: safeReason, sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
+    await emitTrace(trace, { component: 'desktop', stage: error instanceof DesktopBootstrapLeaseLostError ? 'bootstrap.lease.lost' : 'bootstrap.error', level: error instanceof DesktopBootstrapLeaseLostError ? 'warning' : 'error', message: error instanceof DesktopBootstrapLeaseLostError ? 'MySQL 桌面引导租约已失效；当前 worker 停止更新租户状态。' : 'Linux 桌面初始化失败。', durationMs: Date.now() - startedAt, details: { safeError: safeReason, sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
   } finally {
     await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.connection.close', level: 'info', message: '关闭桌面初始化阶段的数据面连接。', details: { sandboxId, generation } }, tenantId, runId);
     sandbox?.close();
+    if (leaseConnection) {
+      const connection = leaseConnection;
+      leaseConnection = undefined;
+      if (!leaseAcquired) {
+        connection.release();
+      } else {
+        try {
+          const [releaseRows] = await connection.execute<RowDataPacket[]>('SELECT RELEASE_LOCK(?) AS released', [leaseName]);
+          if (Number(releaseRows[0]?.released) === 1) {
+            connection.release();
+            await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.lease.released', level: 'info', message: '已释放 MySQL 桌面引导租约。', details: { sandboxId, generation } }, tenantId, runId);
+          } else {
+            connection.destroy();
+            await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.lease.release.unconfirmed', level: 'warning', message: 'MySQL 未确认桌面引导租约已释放；已丢弃该连接。', details: { sandboxId, generation } }, tenantId, runId);
+          }
+        } catch (error) {
+          connection.destroy();
+          await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.lease.release.failed', level: 'warning', message: '释放 MySQL 桌面引导租约时连接失败，已丢弃该连接。', details: { sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
+        }
+      }
+    }
     desktopBootstrapByTenant.delete(tenantId);
+  }
+}
+
+async function assertDesktopBootstrapLease(connection: PoolConnection | undefined, leaseName: string): Promise<void> {
+  if (!connection) throw new DesktopBootstrapLeaseLostError('The desktop bootstrap does not hold its MySQL lease connection.');
+  try {
+    const [rows] = await connection.execute<RowDataPacket[]>('SELECT IS_USED_LOCK(?) = CONNECTION_ID() AS owned', [leaseName]);
+    if (Number(rows[0]?.owned) !== 1) throw new DesktopBootstrapLeaseLostError('The MySQL desktop bootstrap lease is no longer owned by this worker.');
+  } catch (error) {
+    if (error instanceof DesktopBootstrapLeaseLostError) throw error;
+    throw new DesktopBootstrapLeaseLostError('The MySQL desktop bootstrap lease could not be confirmed.');
   }
 }
 
