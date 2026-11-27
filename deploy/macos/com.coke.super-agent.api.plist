@@ -7,11 +7,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/shangguan/.local/opt/node-v24.18.0-darwin-arm64/bin/node</string>
-    <string>/Users/shangguan/Documents/home2026/coke-super-agent/node_modules/tsx/dist/cli.mjs</string>
+    <string>/Users/shangguan/.local/share/coke-super-agent/current/source/node_modules/tsx/dist/cli.mjs</string>
     <string>src/server/index.ts</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/shangguan/Documents/home2026/coke-super-agent</string>
+  <string>/Users/shangguan/.local/share/coke-super-agent/current/source</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>CSA_HOST</key>

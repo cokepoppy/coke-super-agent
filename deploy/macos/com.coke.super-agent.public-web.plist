@@ -7,16 +7,18 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/shangguan/.local/opt/node-v24.18.0-darwin-arm64/bin/node</string>
-    <string>/Users/shangguan/Documents/home2026/coke-super-agent/node_modules/vite/bin/vite.js</string>
+    <string>/Users/shangguan/.local/share/coke-super-agent/current/source/node_modules/vite/bin/vite.js</string>
     <string>preview</string>
     <string>--host</string>
     <string>127.0.0.1</string>
     <string>--port</string>
     <string>5174</string>
     <string>--strictPort</string>
+    <string>--outDir</string>
+    <string>/Users/shangguan/.local/share/coke-super-agent/current/web</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/shangguan/Documents/home2026/coke-super-agent</string>
+  <string>/Users/shangguan/.local/share/coke-super-agent/current/source</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>CSA_PUBLIC_BASE_PATH</key>
