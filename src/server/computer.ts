@@ -449,6 +449,21 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
       ? connected
       : withTrafficToken(connected, decryptSandboxTrafficToken(trafficTokenCiphertext));
     await emitTrace(trace, { component: 'cube', stage: 'sandbox.traffic-token.ready', level: 'info', message: '数据面连接令牌可用，开始传入桌面初始化脚本。', details: { sandboxId, generation, tokenSource: connected.trafficAccessToken ? 'cube-connect' : 'encrypted-mysql-record' } }, tenantId, runId);
+    const existingReadyMarker = await readDesktopGuestFile(sandbox, '/var/lib/csa-desktop/ready');
+    if (existingReadyMarker.trim()) {
+      const existingReadiness = await probeDesktopReadiness(sandbox);
+      await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.guest-session.probe', level: existingReadiness.ready ? 'info' : 'warning', message: existingReadiness.ready ? '现有 XFCE/VNC/noVNC 会话仍健康，跳过重新启动 guest bootstrap。' : 'guest ready 标记存在，但现有会话未通过实时探测，将重新运行桌面引导。', details: { sandboxId, generation, reusedExistingSession: existingReadiness.ready, ...existingReadiness } }, tenantId, runId);
+      if (existingReadiness.ready) {
+        await assertDesktopBootstrapLease(leaseConnection, leaseName);
+        const [updated] = await pool.execute(
+          "UPDATE computers SET desktop_state = 'ready', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND desktop_state = 'installing'",
+          [tenantId, sandboxId, generation],
+        );
+        if ((updated as { affectedRows: number }).affectedRows !== 1) throw new Error('Tenant desktop generation changed while reusing the existing guest session.');
+        await emitTrace(trace, { component: 'desktop', stage: 'bootstrap.ready', level: 'info', message: '现有 Linux 桌面会话已重新关联到当前租户 generation。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, reusedExistingSession: true, browserStatus: existingReadiness.browserStatus } }, tenantId, runId);
+        return;
+      }
+    }
     const bootstrap = await readFile(resolve(process.cwd(), 'scripts/cube/bootstrap-linux-desktop.sh'), 'utf8');
     const launcher = await readFile(resolve(process.cwd(), 'scripts/cube/launch-linux-desktop-bootstrap.sh'), 'utf8');
     const session = await readFile(resolve(process.cwd(), 'scripts/cube/csa-desktop-session.sh'), 'utf8');
