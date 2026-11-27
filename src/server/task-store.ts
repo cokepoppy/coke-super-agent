@@ -165,8 +165,9 @@ export async function transitionRun(
   status: RunStatus,
   eventType: string,
   message: string,
+  leasedConnection?: PoolConnection,
 ): Promise<void> {
-  const connection = await pool.getConnection();
+  const connection = leasedConnection || await pool.getConnection();
   let committed = false;
   try {
     await connection.beginTransaction();
@@ -211,7 +212,7 @@ export async function transitionRun(
     if (!committed) await connection.rollback();
     throw error;
   } finally {
-    connection.release();
+    if (!leasedConnection) connection.release();
   }
 }
 
@@ -248,6 +249,21 @@ export async function appendRunTrace(tenantId: string, runId: string, event: Run
   } finally {
     connection.release();
   }
+}
+
+export function normalizeGuestTraceSequence(value: unknown): number {
+  const sequence = Number(value ?? 0);
+  return Number.isSafeInteger(sequence) && sequence >= 0 ? sequence : 0;
+}
+
+export async function getLastPersistedGuestTraceSequence(tenantId: string, runId: string): Promise<number> {
+  const [rows] = await pool.execute<RowDataPacket[]>(
+    `SELECT COALESCE(MAX(CAST(JSON_UNQUOTE(JSON_EXTRACT(payload, '$.details.guestSequence')) AS UNSIGNED)), 0) AS guest_sequence
+     FROM run_events
+     WHERE tenant_id = ? AND run_id = ? AND event_type = 'debug'`,
+    [tenantId, runId],
+  );
+  return normalizeGuestTraceSequence(rows[0]?.guest_sequence);
 }
 
 export function sanitizeRunTrace(event: RunTraceEvent): RunTraceEvent {

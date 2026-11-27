@@ -3,6 +3,8 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { BrowserState, RunTraceEvent } from '../shared/types.ts';
 import { config } from './config.ts';
+import { resolveDockerBrowserStatus } from './docker-browser-status.ts';
+import { claimDockerDshLaunchIntentScript } from './docker-dsh-launch-intent.ts';
 
 const exec = promisify(execFile);
 const runtimeRoot = '/var/lib/csa-agent-runtime';
@@ -214,6 +216,16 @@ async function readContainerFile(tenantId: string, path: string): Promise<string
   catch { return ''; }
 }
 
+async function readOptionalContainerFile(tenantId: string, path: string): Promise<string | null> {
+  try {
+    return await execContainer(tenantId, ['/bin/sh', '-c',
+      'if [ -e "$1" ]; then exec /usr/bin/cat -- "$1"; else exit 44; fi', 'csa-read', path]);
+  } catch (error) {
+    if ((error as { code?: string | number }).code === 44) return null;
+    throw error;
+  }
+}
+
 async function probeHttpStatus(tenantId: string, url: string): Promise<{ status: number; body: string }> {
   try {
     const output = await execContainer(tenantId, [
@@ -255,11 +267,7 @@ export async function probeTenantDockerDesktop(tenantId: string): Promise<Docker
   // websockify answers HTTP requests with 400/405 and only upgrades WebSocket clients.
   const websockifyReady = websockify.status === 400 || websockify.status === 405;
   const rawStatus = statusText.trim().slice(0, 16);
-  const browserStatus: BrowserState = rawStatus === 'failed'
-    ? 'failed'
-    : cdpReady && rawStatus === 'ready' ? 'ready'
-      : rawStatus === 'starting' || (sessionReady && !cdpReady) ? 'starting'
-        : 'unknown';
+  const browserStatus = resolveDockerBrowserStatus(rawStatus, Boolean(sessionReady), cdpReady);
   return {
     ready: Boolean(sessionReady && cdpReady && websockifyReady),
     containerRunning,
@@ -298,19 +306,20 @@ export async function writeTenantDockerDshInput(tenantId: string, runId: string,
 
 export async function tenantDockerDshLaunchIntentExists(tenantId: string, runId: string): Promise<boolean> {
   const path = `${statePath(runId)}/launch.intent`;
-  try {
-    await execContainer(tenantId, ['/usr/bin/test', '-f', path]);
-    return true;
-  } catch { return false; }
+  const result = await execContainer(tenantId, ['/bin/sh', '-c',
+    'if [ -e "$1" ]; then printf exists; else printf missing; fi', 'csa-check', path]);
+  if (result !== 'exists' && result !== 'missing') throw new Error('Docker DSH launch intent could not be checked.');
+  return result === 'exists';
 }
 
-export async function createTenantDockerDshLaunchIntent(tenantId: string, runId: string): Promise<void> {
+export async function createTenantDockerDshLaunchIntent(tenantId: string, runId: string): Promise<boolean> {
   const directory = statePath(runId);
-  const path = `${directory}/launch.intent`;
-  await dockerInput([
-    'exec', '--user', agentUid, '-i', tenantDockerContainerName(tenantId),
-    '/bin/sh', '-c', `umask 077; cat > ${path}`,
-  ], `${new Date().toISOString()}\n`, 10_000);
+  const result = await docker([
+    'exec', '--user', agentUid, tenantDockerContainerName(tenantId),
+    '/bin/sh', '-c', claimDockerDshLaunchIntentScript, 'csa-claim', directory, new Date().toISOString(),
+  ], 10_000);
+  if (result !== 'created' && result !== 'exists') throw new Error('Docker DSH launch intent could not be reserved.');
+  return result === 'created';
 }
 
 export async function startTenantDockerDshTask(tenantId: string, runId: string, threadId: string): Promise<void> {
@@ -335,31 +344,29 @@ export async function startTenantDockerDshTask(tenantId: string, runId: string, 
 }
 
 export async function readTenantDockerDshState(tenantId: string, runId: string): Promise<DockerAgentState | null> {
-  let raw: string;
-  try { raw = await execContainer(tenantId, ['/usr/bin/cat', `${statePath(runId)}/state.json`]); }
-  catch { return null; }
+  const raw = await readOptionalContainerFile(tenantId, `${statePath(runId)}/state.json`);
+  if (raw === null) return null;
   try {
     const value: unknown = JSON.parse(raw);
-    return value && typeof value === 'object' ? value as DockerAgentState : null;
-  } catch { return null; }
+    if (value && typeof value === 'object') return value as DockerAgentState;
+  } catch { /* Preserve the existing run rather than treating corrupt state as absent. */ }
+  throw new Error('Docker DSH state exists but is invalid.');
 }
 
 export async function tenantDockerDshProcessIsAlive(tenantId: string, pid: number, runId: string): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid <= 0 || !runUuid.test(runId)) return false;
-  const cmdline = await readContainerFile(tenantId, `/proc/${pid}/cmdline`);
-  return cmdline.includes('run-task.bundle.mjs') && cmdline.includes(runId);
+  const cmdline = await readOptionalContainerFile(tenantId, `/proc/${pid}/cmdline`);
+  return Boolean(cmdline?.includes('run-task.bundle.mjs') && cmdline.includes(runId));
 }
 
 export async function tenantDockerDshTaskProcessExists(tenantId: string, runId: string): Promise<boolean> {
   if (!runUuid.test(runId)) return false;
-  let pids: string[];
-  try {
-    pids = (await execContainer(tenantId, ['/usr/bin/pgrep', '-f', 'run-task.bundle.mjs'], 5_000))
-      .split(/\s+/).filter(value => /^\d+$/.test(value));
-  } catch { return false; }
+  const pids = (await execContainer(tenantId, ['/bin/sh', '-c',
+    '/usr/bin/pgrep -f run-task.bundle.mjs || { status=$?; [ "$status" -eq 1 ]; }'], 5_000))
+    .split(/\s+/).filter(value => /^\d+$/.test(value));
   for (const pid of pids.slice(0, 64)) {
-    const cmdline = await readContainerFile(tenantId, `/proc/${pid}/cmdline`);
-    if (cmdline.includes('run-task.bundle.mjs') && cmdline.includes(runId)) return true;
+    const cmdline = await readOptionalContainerFile(tenantId, `/proc/${pid}/cmdline`);
+    if (cmdline?.includes('run-task.bundle.mjs') && cmdline.includes(runId)) return true;
   }
   return false;
 }

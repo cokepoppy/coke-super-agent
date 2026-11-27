@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ActivityFeedItem, BrowserState, ComputerState, ComputerView, RunDetail, RunEventView, RunSummary, SessionView, TaskArtifact } from '../shared/types.ts';
+import { noVncWebSocketPath } from '../shared/no-vnc-path.ts';
 import './style.css';
 
 type View = 'chat' | 'activity' | 'computer';
@@ -450,7 +451,8 @@ function ComputerPanel({ tenant }: { tenant: string }) {
     not_created: '云电脑尚未启动', creating: '正在启动 Linux microVM', running: 'Linux microVM 已运行',
     paused: 'Linux microVM 已暂停', failed: '上次启动失败',
   };
-  const desktopUrl = appPath('/novnc/vnc.html?autoconnect=true&resize=scale&path=' + encodeURIComponent(appPath('/api/computer/desktop/websockify')));
+  const desktopSocketPath = noVncWebSocketPath(appPath('/api/computer/desktop/websockify'));
+  const desktopUrl = appPath('/novnc/vnc.html?autoconnect=true&resize=scale&path=' + encodeURIComponent(desktopSocketPath));
   const desktopReady = computer?.state === 'running' && computer.desktopState === 'ready';
   const computerFailed = computer?.state === 'failed' || computer?.desktopState === 'failed';
 

@@ -26,11 +26,14 @@ import {
   writeTenantDockerDshInput,
   type DockerAgentState,
 } from './docker-desktop.ts';
-import { pool } from './db.ts';
+import { pool, runLeasePool } from './db.ts';
 import { runGuestPty, stageRuntimeBundle, startGuestPty } from './runtime-bundle.ts';
-import { appendRunTrace, sanitizeRunTrace, transitionRun } from './task-store.ts';
+import { appendRunTrace, getLastPersistedGuestTraceSequence, sanitizeRunTrace, transitionRun } from './task-store.ts';
 import { isGuestAgentProcessCommandLine } from './guest-process-identity.ts';
 import { classifyGuestRunRecovery } from './guest-run-recovery.ts';
+import { TenantRunLeaseLostError, tryAcquireTenantRunLease, type TenantRunLease } from './tenant-run-lease.ts';
+import { claimAndStartDockerDsh, DockerDshRecoveryPendingError } from './docker-dsh-launch-intent.ts';
+import { waitForDockerDshStartupEvidence } from './docker-dsh-startup-recovery.ts';
 
 interface PendingRun extends RowDataPacket {
   id: string;
@@ -123,32 +126,79 @@ async function drainTenant(tenantId: string): Promise<void> {
   const drainStartedAt = Date.now();
   activeTenants.add(tenantId);
   writeRuntimeLog('queue.drain.start', 'info', { tenantId });
+  let lease: TenantRunLease | null = null;
+  let immediateReschedule = true;
   try {
+    if (config.agent.dshPlacement === 'docker') {
+      lease = await tryAcquireTenantRunLease(runLeasePool, config.mysql.database, tenantId);
+      if (!lease) {
+        // The periodic scanner will retry; an immediate microtask here spins
+        // while another process is legitimately monitoring the same tenant.
+        immediateReschedule = false;
+        return;
+      }
+    }
     while (!stopped) {
+      await lease?.assertOwned();
       const run = await nextPendingRun(tenantId);
       if (!run) return;
       if (run.status === 'queued') {
-        await transitionRun(tenantId, run.id, 'working', 'progress', 'Agent Runtime 已接单，正在准备租户云电脑。');
+        await transitionLeasedRun(lease, tenantId, run.id, 'working', 'progress', 'Agent Runtime 已接单，正在准备租户云电脑。');
         await trace(run, { component: 'agent-runtime', stage: 'queue.accepted', level: 'info', message: 'Agent Runtime 已接单。' });
       }
       try {
-        await executeRun(run);
+        await executeRun(run, lease);
       } catch (error) {
+        if (lease && (error instanceof TenantRunLeaseLostError || error instanceof DockerDshRecoveryPendingError || run.status === 'working')) {
+          immediateReschedule = false;
+          const key = `queue.recovery:${tenantId}:${run.id}`;
+          const shouldPublish = Date.now() - (runtimeErrorLogAt.get(key) || 0) >= 30_000;
+          writeRateLimitedRuntimeError(key, 'queue.recovery.pending', { tenantId, runId: run.id, ...runtimeErrorDetails(error) });
+          if (shouldPublish && !(error instanceof TenantRunLeaseLostError)) {
+            await transitionLeasedRun(lease, tenantId, run.id, 'working', 'progress', '正在核对原任务执行状态；确认结果前不会重复启动。').catch(() => undefined);
+          }
+          return;
+        }
         const message = safeError(error);
         await trace(run, { component: 'agent-runtime', stage: 'run.failed', level: 'error', message, details: runtimeErrorDetails(error) });
-        await transitionRun(tenantId, run.id, 'failed', 'failed', message).catch(transitionError => {
+        await transitionLeasedRun(lease, tenantId, run.id, 'failed', 'failed', message).catch(transitionError => {
           const failure = sanitizeRunTrace({ component: 'agent-runtime', stage: 'run.failed.persist', level: 'error', message: safeError(transitionError) });
           process.stderr.write(JSON.stringify({ timestamp: new Date().toISOString(), logger: 'coke-super-agent.run', tenantId, runId: run.id, sequence: null, persisted: false, ...failure }) + '\n');
         });
       }
     }
+  } catch (error) {
+    immediateReschedule = false;
+    if (!(error instanceof TenantRunLeaseLostError)) throw error;
+    writeRateLimitedRuntimeError(`queue.lease:${tenantId}`, 'queue.lease.lost', { tenantId, ...runtimeErrorDetails(error) });
   } finally {
+    await lease?.release();
     activeTenants.delete(tenantId);
     writeRuntimeLog('queue.drain.complete', 'info', { tenantId, durationMs: Date.now() - drainStartedAt });
-    if (!stopped) {
+    if (!stopped && immediateReschedule) {
       const remaining = await nextPendingRun(tenantId).catch(() => null);
       if (remaining) queueMicrotask(() => scheduleAgentRun(tenantId));
     }
+  }
+}
+
+async function transitionLeasedRun(
+  lease: TenantRunLease | null,
+  tenantId: string,
+  runId: string,
+  status: RunStatus,
+  eventType: string,
+  message: string,
+): Promise<void> {
+  if (!lease) return transitionRun(tenantId, runId, status, eventType, message);
+  await lease.assertOwned();
+  try {
+    // The transition uses the same MySQL session as GET_LOCK, so losing the
+    // session cannot silently commit a stale worker's status update.
+    await transitionRun(tenantId, runId, status, eventType, message, lease.connection);
+  } catch (error) {
+    await lease.assertOwned();
+    throw error;
   }
 }
 
@@ -169,7 +219,7 @@ function writeRateLimitedRuntimeError(key: string, stage: string, details: Recor
   writeRuntimeLog(stage, 'error', { ...details, suppressedOccurrences });
 }
 
-async function executeRun(run: PendingRun): Promise<void> {
+async function executeRun(run: PendingRun, lease: TenantRunLease | null): Promise<void> {
   const runtimeEngine = config.agent.runtime;
   if (runtimeEngine !== 'dsh' && runtimeEngine !== 'pi') {
     throw new Error('CSA_AGENT_RUNTIME must be dsh or pi.');
@@ -191,7 +241,7 @@ async function executeRun(run: PendingRun): Promise<void> {
   const endpoint = new URL(modelBaseUrl);
   await trace(run, { component: 'agent-runtime', stage: 'runtime.engine.selected', level: 'info', message: '本次任务使用 ' + (runtimeEngine === 'pi' ? 'Pi' : 'DeepSeek Harness') + ' Agent Runtime。', details: { engine: runtimeEngine } });
   await trace(run, { component: 'configuration', stage: 'model.ready', level: 'info', message: 'DeepSeek 模型与 API 地址配置已就绪。', details: { engine: runtimeEngine, model: model.model, endpointHost: endpoint.host, endpointPath: endpoint.pathname, apiProtocol: runtimeEngine === 'pi' ? 'openai-completions' : 'anthropic-messages', apiKeyConfigured: true } });
-  await transitionRun(run.tenant_id, run.id, 'working', 'progress', '正在启动或恢复租户 Linux microVM。');
+  await transitionLeasedRun(lease, run.tenant_id, run.id, 'working', 'progress', '正在启动或恢复租户 Linux microVM。');
 
   let computer = await startTenantComputer(run.tenant_id, { purpose: 'task', trace: event => trace(run, event), runId: run.id });
   if (computer.state === 'creating') {
@@ -209,7 +259,9 @@ async function executeRun(run: PendingRun): Promise<void> {
   if (computer.state !== 'running') throw new Error('租户 Linux microVM 启动失败，请到“云电脑”页面检查状态。');
 
   if (config.agent.dshPlacement === 'docker') {
-    await executeDshRunInDocker(run, model);
+    if (!lease) throw new TenantRunLeaseLostError('Docker DSH cannot run without a tenant run lease.');
+    await lease.assertOwned();
+    await executeDshRunInDocker(run, model, lease);
     return;
   }
 
@@ -367,7 +419,7 @@ async function executeRun(run: PendingRun): Promise<void> {
   }
 }
 
-async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; model: string }): Promise<void> {
+async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; model: string }, lease: TenantRunLease): Promise<void> {
   const desktopWaitStartedAt = Date.now();
   const desktopDeadline = desktopWaitStartedAt + 180_000;
   let computer = await getTenantComputer(run.tenant_id);
@@ -392,6 +444,7 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
 
   const startedAt = Date.now();
   await trace(run, { component: 'docker', stage: 'container.ensure.start', level: 'info', message: '检查并启动租户专属的 Docker DSH/桌面容器。', details: { image: config.docker.desktopImage } });
+  await lease.assertOwned();
   const target = await ensureTenantDockerDesktop(run.tenant_id);
   await trace(run, { component: 'docker', stage: 'container.ensure.complete', level: 'info', message: '租户 Docker 容器已运行。', durationMs: Date.now() - startedAt, details: { desktopLoopbackPort: target.port } });
   const desktopProbeDeadline = Date.now() + 180_000;
@@ -439,10 +492,39 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
     details: { statePresent: existingState !== null, stateStatus: existingState?.status || null, pidPresent: Number.isSafeInteger(existingState?.pid), launchIntentExists },
   });
   if (existingState && isTerminalGuestState(existingState.status)) {
-    await publishGuestTraces(run, existingState, 0);
+    const lastTraceSequence = await getLastPersistedGuestTraceSequence(run.tenant_id, run.id);
+    await publishGuestTraces(run, existingState, lastTraceSequence);
     await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.terminal-state', level: 'info', message: 'Docker DSH 已写入最终状态；恢复器直接提交结果，不会重新运行任务。', details: { status: existingState.status ?? null } });
     if (existingState.status === 'failed') await traceDockerDshSessionFailure(run);
-    await persistGuestState(run.tenant_id, run.id, existingState);
+    await waitForDockerDshProcessExit(run, lease);
+    await persistGuestState(run.tenant_id, run.id, existingState, lease);
+    return;
+  }
+  if (!existingState && launchIntentExists) {
+    await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.startup.inspect', level: 'info', message: '发现持久化启动意图但尚无状态文件；短暂轮询现有 Harness 进程与状态，不会重新启动。' });
+    const evidence = await waitForDockerDshStartupEvidence({
+      readState: () => readTenantDockerDshState(run.tenant_id, run.id),
+      processExists: () => tenantDockerDshTaskProcessExists(run.tenant_id, run.id),
+      assertLease: () => lease.assertOwned(),
+      delay,
+      timeoutMs: 12_000,
+      pollMs: 500,
+    });
+    if (evidence.state && isTerminalGuestState(evidence.state.status)) {
+      const lastTraceSequence = await getLastPersistedGuestTraceSequence(run.tenant_id, run.id);
+      await publishGuestTraces(run, evidence.state, lastTraceSequence);
+      await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.terminal-state', level: 'info', message: '恢复轮询发现 Docker DSH 已写入最终状态；直接提交结果，不会重新运行任务。', details: { status: evidence.state.status ?? null } });
+      if (evidence.state.status === 'failed') await traceDockerDshSessionFailure(run);
+      await waitForDockerDshProcessExit(run, lease);
+      await persistGuestState(run.tenant_id, run.id, evidence.state, lease);
+      return;
+    }
+    if (evidence.processExists) {
+      await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.process.alive', level: 'info', message: '发现原 Docker DSH 进程仍在运行；接回现有任务并继续监听，不会创建第二个 Agent。' });
+      await monitorDockerDshRun(run, evidence.state, lease);
+      return;
+    }
+    await failDockerDshRun(run, 'Docker DSH 启动意图存在，但观察期内没有发现原进程或可接回的运行状态；为避免重复操作，任务没有自动重放。可以在同一对话中继续。', 'docker.recovery.start-missing', evidence.state, lease);
     return;
   }
   if (existingState || launchIntentExists) {
@@ -451,46 +533,58 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
       : false;
     if (alive && existingState) {
       await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.process.alive', level: 'info', message: '发现仍在运行且任务 ID 匹配的 Docker DSH 进程，将继续监听原任务，不会创建第二个 Agent。', details: { pid: existingState.pid! } });
-      await monitorDockerDshRun(run, existingState);
+      await monitorDockerDshRun(run, existingState, lease);
       return;
     }
-    const output = await safeDockerDshOutput(run);
-    await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.fail-closed', level: 'error', message: 'Docker DSH 有既存状态或启动意图，但无法验证原任务仍在运行；为避免重复执行，停止自动重放。', details: { stateStatus: existingState?.status || null, launchIntentExists, pidPresent: Number.isSafeInteger(existingState?.pid), outputTail: output || null } });
-    await transitionRun(run.tenant_id, run.id, 'failed', 'failed', 'Docker 中的任务状态不完整或原进程已退出；为避免重复操作，任务没有自动重放。可以在同一对话中继续。');
-    return;
+    throw new DockerDshRecoveryPendingError('Docker DSH 已有启动意图或未完成状态，但无法确认原进程的结果。');
   }
 
   const terminalBridgeToken = createAgentBridgeToken(run.tenant_id, run.id);
   const terminalBridgeUrl = `http://host.docker.internal:${config.port}/api/internal/agent/terminal`;
   const inputStartedAt = Date.now();
   await trace(run, { component: 'docker', stage: 'dsh.input.write.start', level: 'info', message: '安全写入 DSH 任务输入；模型密钥和短期 Cube 工具令牌不会放入 Docker 命令参数或日志。' });
-  await writeTenantDockerDshInput(run.tenant_id, run.id, {
-    threadId: run.thread_id,
-    prompt: run.prompt,
-    baseUrl: model.baseUrl,
-    model: model.model,
-    apiKey: config.agent.apiKey,
-    terminalBridgeUrl,
-    terminalBridgeToken,
-  });
-  await createTenantDockerDshLaunchIntent(run.tenant_id, run.id);
-  await trace(run, { component: 'docker', stage: 'dsh.input.write.complete', level: 'info', message: '任务输入和一次性启动意图已写入租户 runtime 卷。', durationMs: Date.now() - inputStartedAt, details: { inputBytes: Buffer.byteLength(JSON.stringify({ runId: run.id, threadId: run.thread_id, prompt: run.prompt, baseUrl: model.baseUrl, model: model.model })), stateRoot: '/var/lib/csa-agent-runtime' } });
-
   const launchStartedAt = Date.now();
-  await trace(run, { component: 'dsh', stage: 'docker.harness.launch.start', level: 'info', message: '在租户 Docker 容器中启动 DeepSeek Harness；本地 Bash 和本地文件工具已从 DSH tool registry 禁用。', details: { profile: 'sdk-minimal', model: model.model, remoteTerminal: true, desktopLoopbackPort: target.port } });
-  await startTenantDockerDshTask(run.tenant_id, run.id, run.thread_id);
+  const launched = await claimAndStartDockerDsh({
+    lease,
+    claim: () => createTenantDockerDshLaunchIntent(run.tenant_id, run.id),
+    isStopped: () => stopped,
+    writeInput: async () => {
+      await writeTenantDockerDshInput(run.tenant_id, run.id, {
+        threadId: run.thread_id,
+        prompt: run.prompt,
+        baseUrl: model.baseUrl,
+        model: model.model,
+        apiKey: config.agent.apiKey,
+        terminalBridgeUrl,
+        terminalBridgeToken,
+      });
+      await trace(run, { component: 'docker', stage: 'dsh.input.write.complete', level: 'info', message: '任务输入和一次性启动意图已写入租户 runtime 卷。', durationMs: Date.now() - inputStartedAt, details: { inputBytes: Buffer.byteLength(JSON.stringify({ runId: run.id, threadId: run.thread_id, prompt: run.prompt, baseUrl: model.baseUrl, model: model.model })), stateRoot: '/var/lib/csa-agent-runtime' } });
+    },
+    start: async () => {
+      await trace(run, { component: 'dsh', stage: 'docker.harness.launch.start', level: 'info', message: '在租户 Docker 容器中启动 DeepSeek Harness；本地 Bash 和本地文件工具已从 DSH tool registry 禁用。', details: { profile: 'sdk-minimal', model: model.model, remoteTerminal: true, desktopLoopbackPort: target.port } });
+      await lease.assertOwned();
+      if (stopped) throw new DockerDshRecoveryPendingError('服务已停止，任务启动状态需要核对。');
+      await startTenantDockerDshTask(run.tenant_id, run.id, run.thread_id);
+    },
+  });
+  if (!launched) return;
   await trace(run, { component: 'dsh', stage: 'docker.harness.launch.complete', level: 'info', message: 'DeepSeek Harness 后台进程已启动，等待 runtime 状态文件和模型事件。', durationMs: Date.now() - launchStartedAt });
-  await monitorDockerDshRun(run, { status: 'working', message: 'DeepSeek Harness 正在 Docker 租户容器中启动。' });
+  try { await monitorDockerDshRun(run, { status: 'working', message: 'DeepSeek Harness 正在 Docker 租户容器中启动。' }, lease); }
+  catch (error) {
+    if (error instanceof TenantRunLeaseLostError || error instanceof DockerDshRecoveryPendingError) throw error;
+    throw new DockerDshRecoveryPendingError('Docker DSH 已启动，但暂时无法确认运行结果。', { cause: error });
+  }
 }
 
-async function monitorDockerDshRun(run: PendingRun, initial: DockerAgentState | null): Promise<void> {
+async function monitorDockerDshRun(run: PendingRun, initial: DockerAgentState | null, lease: TenantRunLease): Promise<void> {
   let current = initial;
   let lastMessage = initial?.message || '';
-  let lastTraceSequence = 0;
+  let lastTraceSequence = await getLastPersistedGuestTraceSequence(run.tenant_id, run.id);
   let lastHeartbeatAt = Date.now();
   let lastProcessCheckAt = 0;
   let missingStateSince: number | undefined;
   while (!stopped) {
+    await lease.assertOwned();
     const next = await readTenantDockerDshState(run.tenant_id, run.id);
     if (next) {
       missingStateSince = undefined;
@@ -498,45 +592,37 @@ async function monitorDockerDshRun(run: PendingRun, initial: DockerAgentState | 
       lastTraceSequence = await publishGuestTraces(run, next, lastTraceSequence);
       if (typeof next.message === 'string' && next.message && next.message !== lastMessage && !isTerminalGuestState(next.status)) {
         lastMessage = next.message;
-        await transitionRun(run.tenant_id, run.id, 'working', 'progress', next.message);
+        await transitionLeasedRun(lease, run.tenant_id, run.id, 'working', 'progress', next.message);
       }
       if (isTerminalGuestState(next.status)) {
         if (next.status === 'failed') await traceDockerDshSessionFailure(run);
-        await persistGuestState(run.tenant_id, run.id, next);
-        const exitDeadline = Date.now() + guestTerminalExitGraceMs;
-        let processExited = false;
-        while (Date.now() < exitDeadline && Number.isSafeInteger(next.pid)) {
-          if (!await tenantDockerDshProcessIsAlive(run.tenant_id, next.pid!, run.id)) { processExited = true; break; }
-          await delay(1000);
-        }
-        await trace(run, {
-          component: 'agent-runtime', stage: processExited ? 'docker.process.terminal-exit.complete' : 'docker.process.terminal-exit.timeout',
-          level: processExited ? 'info' : 'warning',
-          message: processExited ? 'Docker DSH 进程已在最终状态写入后退出。' : 'Docker DSH 已写入最终状态，但进程未在清理宽限期内退出。',
-          details: { pid: next.pid ?? null, graceMs: guestTerminalExitGraceMs },
-        });
+        await waitForDockerDshProcessExit(run, lease);
+        await persistGuestState(run.tenant_id, run.id, next, lease);
         return;
       }
       if (next.status === 'working' && Number.isSafeInteger(next.pid) && Date.now() - lastProcessCheckAt >= 15_000) {
         lastProcessCheckAt = Date.now();
         if (!await tenantDockerDshProcessIsAlive(run.tenant_id, next.pid!, run.id)) {
+          if (await tenantDockerDshTaskProcessExists(run.tenant_id, run.id)) {
+            throw new DockerDshRecoveryPendingError('Docker DSH 状态中的 PID 与实际任务进程不一致。');
+          }
           const finalState = await waitForDockerDshTerminalState(run, 8_000);
           if (finalState) {
             lastTraceSequence = await publishGuestTraces(run, finalState, lastTraceSequence);
             if (finalState.status === 'failed') await traceDockerDshSessionFailure(run);
-            await persistGuestState(run.tenant_id, run.id, finalState);
+            await waitForDockerDshProcessExit(run, lease);
+            await persistGuestState(run.tenant_id, run.id, finalState, lease);
             return;
           }
-          await failDockerDshRun(run, 'Docker DSH 进程已退出，但没有写出可读取的最终状态；为避免重复操作，任务没有自动重放。', 'docker.process.missing', current);
+          await failDockerDshRun(run, 'Docker DSH 进程已退出，但没有写出可读取的最终状态；为避免重复操作，任务没有自动重放。', 'docker.process.missing', current, lease);
           return;
         }
       }
     } else {
       missingStateSince ??= Date.now();
-      const processExists = await tenantDockerDshTaskProcessExists(run.tenant_id, run.id).catch(() => false);
+      const processExists = await tenantDockerDshTaskProcessExists(run.tenant_id, run.id);
       if (!processExists && Date.now() - missingStateSince >= 8_000) {
-        await failDockerDshRun(run, 'Docker DSH 启动进程已退出，且没有写出可读取的最终状态；为避免重复操作，任务没有自动重放。', 'docker.state.missing', current);
-        return;
+        throw new DockerDshRecoveryPendingError('Docker DSH 启动意图存在，但尚未确认进程是否启动或完成。');
       }
     }
     if (Date.now() - lastHeartbeatAt >= 30_000) {
@@ -545,6 +631,19 @@ async function monitorDockerDshRun(run: PendingRun, initial: DockerAgentState | 
     }
     await delay(1200);
   }
+}
+
+async function waitForDockerDshProcessExit(run: PendingRun, lease: TenantRunLease): Promise<void> {
+  const deadline = Date.now() + guestTerminalExitGraceMs;
+  do {
+    await lease.assertOwned();
+    if (!await tenantDockerDshTaskProcessExists(run.tenant_id, run.id)) {
+      await trace(run, { component: 'agent-runtime', stage: 'docker.process.terminal-exit.complete', level: 'info', message: 'Docker DSH 任务进程已退出，可以提交最终状态。' });
+      return;
+    }
+    await delay(1_000);
+  } while (!stopped && Date.now() < deadline);
+  throw new DockerDshRecoveryPendingError('Docker DSH 已写入最终状态，但任务进程仍未确认退出。');
 }
 
 async function waitForDockerDshTerminalState(run: PendingRun, timeoutMs: number): Promise<DockerAgentState | null> {
@@ -557,14 +656,14 @@ async function waitForDockerDshTerminalState(run: PendingRun, timeoutMs: number)
   return null;
 }
 
-async function failDockerDshRun(run: PendingRun, message: string, stage: string, state: DockerAgentState | null): Promise<void> {
+async function failDockerDshRun(run: PendingRun, message: string, stage: string, state: DockerAgentState | null, lease: TenantRunLease): Promise<void> {
   const outputTail = await safeDockerDshOutput(run);
   await trace(run, {
     component: 'agent-runtime', stage, level: 'error', message,
     details: { pid: state?.pid ?? null, runtimeStage: state?.stage || null, outputTail: outputTail || null },
   });
   const outputContext = outputTail ? `\n\nDocker DSH stdout/stderr 尾部：\n${outputTail}` : '';
-  await transitionRun(run.tenant_id, run.id, 'failed', 'failed', message + outputContext);
+  await transitionLeasedRun(lease, run.tenant_id, run.id, 'failed', 'failed', message + outputContext);
 }
 
 async function safeDockerDshOutput(run: PendingRun): Promise<string> {
@@ -1406,7 +1505,8 @@ async function publishGuestTraces(run: PendingRun, state: GuestRunState, lastSeq
     if (!value || typeof value !== 'object') continue;
     const entry = value as RunTraceEvent & { sequence: number };
     if (!Number.isSafeInteger(entry.sequence) || entry.sequence <= latestSequence) continue;
-    const { sequence: _sequence, ...event } = entry;
+    const { sequence, ...event } = entry;
+    event.details = { ...(event.details || {}), guestSequence: sequence };
     await trace(run, event);
     latestSequence = entry.sequence;
   }
@@ -1572,7 +1672,7 @@ function isTerminalGuestState(status: GuestRunState['status']): boolean {
   return status === 'waiting_for_user' || status === 'done' || status === 'failed';
 }
 
-async function persistGuestState(tenantId: string, runId: string, state: GuestRunState): Promise<void> {
+async function persistGuestState(tenantId: string, runId: string, state: GuestRunState, lease: TenantRunLease | null = null): Promise<void> {
   const message = typeof state.message === 'string' && state.message.trim() ? state.message : 'Agent 任务结束。';
   const mapping: Record<string, { status: RunStatus; eventType: string }> = {
     waiting_for_user: { status: 'waiting_for_user', eventType: 'waiting_for_user' },
@@ -1589,7 +1689,7 @@ async function persistGuestState(tenantId: string, runId: string, state: GuestRu
     message,
     ...(state.errorName ? { details: { errorName: state.errorName } } : {}),
   });
-  await transitionRun(tenantId, runId, result.status, result.eventType, message);
+  await transitionLeasedRun(lease, tenantId, runId, result.status, result.eventType, message);
 }
 
 async function trace(run: PendingRun, event: RunTraceEvent): Promise<void> {

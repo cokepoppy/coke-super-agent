@@ -1,6 +1,6 @@
 import { once } from 'node:events';
 import { config } from './config.ts';
-import { pool } from './db.ts';
+import { pool, runLeasePool } from './db.ts';
 import { migrate } from './migrate.ts';
 import { listen } from './http.ts';
 import { startAgentRuntime, stopAgentRuntime } from './agent-runtime.ts';
@@ -75,7 +75,7 @@ async function start(): Promise<void> {
     stopAgentRuntime();
     server.close(() => {
       logLifecycle('http.server.closed', 'info', { signal });
-      void pool.end().then(() => {
+      void Promise.all([pool.end(), runLeasePool.end()]).then(() => {
         logLifecycle('shutdown.complete', 'info', { signal });
         process.exit(0);
       }).catch(error => {
@@ -100,6 +100,6 @@ start().catch(async error => {
     ...(value.stack ? { errorStack: value.stack.slice(-4000) } : {}),
     ...(value.cause instanceof Error ? { errorCause: value.cause.message } : {}),
   });
-  await pool.end();
+  await Promise.all([pool.end(), runLeasePool.end()]);
   process.exitCode = 1;
 });
