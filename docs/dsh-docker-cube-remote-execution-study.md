@@ -4,11 +4,13 @@
 
 ## 建议
 
-**可以把 DSH 和云桌面一起部署在 Mac 的 Docker 里。** 建议用同一个 Compose 项目，运行一个 DSH Runner，以及每个租户各自的桌面容器。XFCE、可见的 Chrome、noVNC 和处理浏览器或键鼠操作的 Worker 在同一个桌面容器中。每个租户仍有一台 Cube microVM，负责 Bash、任务代码、Python、Node、apt 和持久工作区。Alice 与 Bob 两个测试账号共用一个 Runner，各用自己的桌面容器、Chrome 配置卷和 VM。
+**建议先采用每租户一个 Docker 容器加一台 Cube microVM。** 容器里放 DSH、XFCE、可见 Chrome、noVNC、Browser/Computer Worker；Cube VM 负责 Bash、任务代码、Python、Node、apt 和持久工作区。TypeScript 应用统一管理任务、租户鉴权、Docker 容器和 Cube 生命周期。Docker 容器及两个命名卷按租户创建，不使用 K3D、不另设共享 DSH Runner，也不另开常驻 Bash HTTP 服务。
 
-**同一容器也能跑 DSH 和桌面。** 单租户演示可以这样做。多租户版本建议分成上述两个角色，因为 DSH 持有模型凭据，而桌面处理网页、键鼠输入和租户的登录态。分开后，重启 DSH 可以保留用户眼前的 Chrome 会话。用 Compose 一次部署这些容器，无需 K3D。沿用 Coke Dots 风格的任务、活动和云电脑页面，现有 TypeScript 应用负责任务、鉴权和工具分发。
+DSH 的默认本地 Bash、PowerShell、文件和工作目录工具关闭，模型需要执行命令时通过 `computer_terminal` 调用应用桥，再由 Cube SDK 在该租户 VM 执行。Container 内 DSH 用 UID 1001 和私有 0700 状态目录，桌面用 UID 1000；移除桌面免密 sudo、设置 `no-new-privileges`，不挂载宿主目录或 Docker Socket。这样保留单容器的简单拓扑，同时降低桌面终端直接读 DSH 状态的风险。桌面容器仍要按可能执行租户网页代码来隔离；UID 分离和 Docker 本身都不等于绝对安全，尤其当前 Chrome 使用 `--no-sandbox` 以兼容 Docker 默认 seccomp。
 
-这个取舍有本机对照。11 月 25 日在同一台 Lima 节点，用相同 ARM64 镜像、Chrome 158、2 vCPU 和 2 GiB 内存测试离线页面。Docker 约 1 秒输出了预期 HTML，Cube guest 在 35 秒截止时仍无 HTML。旧版公网任务也记录过 CDP 连接被拒绝、X11 截图失败而 Bash 成功。对照支持把图形路径移到 Docker。具体的 guest 内核或虚拟化成因仍待定位，Docker 上完整的可见桌面和新 DSH 链路也有待实测。 [同机对照及原始日志索引](template-build-incident-2026-11-21.md#2026-11-25-same-lima-docker-control-and-profile-scoped-chrome-process-sample) · [公网任务检查点](checkpoints/checkpoint-2026-11-27.1.md)
+将 DSH 与桌面拆成两个容器能增加凭据和浏览器的隔离，但也需要更多服务、内部鉴权和重启协调。首版先保持每租户一个 Docker 容器，只有出现明确的安全或资源需求再拆分。
+
+这个选择有本机对照。11 月 25 日，在同一台 Lima 节点用相同 ARM64 镜像、Chrome 158、2 vCPU 和 2 GiB 内存测试离线页面，Docker 约 1 秒输出预期 HTML，Cube guest 在 35 秒截止时仍无 HTML。11 月 27 日构建的 `.8` 镜像已通过真实 DSH Browser/Computer Use 与远端 Cube Bash 任务；页面内按钮被点击后，DOM 状态变成 `CLICKED_OK`。这验证了分层设计的关键数据路径，但尚未通过产品网页里的人工 noVNC 点击、应用重启恢复或公网页面验收。 [同机对照及原始日志索引](template-build-incident-2026-11-21.md#2026-11-25-same-lima-docker-control-and-profile-scoped-chrome-process-sample) · [公网任务检查点](checkpoints/checkpoint-2026-11-27.1.md)
 
 ## DeepSeek 有没有原生远程 Bash
 
@@ -35,14 +37,15 @@ DSH 只加载镜像内由项目维护的插件和配置。模型看到的是约�
 flowchart LR
     U[用户浏览器] --> V[VPS Nginx 与反向隧道] --> A[Mac 上的 TypeScript 应用]
     A --> DB[(MySQL)]
-    subgraph DockerSide["Mac 上的 Docker Compose"]
-        D[共享 DSH Runner]
-        W["每租户桌面容器 · XFCE / Chrome / noVNC / Worker"]
-        W --> P[(租户 Chrome 配置卷)]
+    subgraph DockerSide["Mac 上的 Docker Engine"]
+        D["每租户一个容器 · DSH UID 1001"]
+        W["同容器桌面 · XFCE / Chrome / noVNC / Worker · UID 1000"]
+        D --- W
+        D --> P[(租户 DSH 状态卷)]
+        W --> Q[(租户桌面与工作区卷)]
     end
-    A <-->|任务与工具事件| D
+    A <-->|任务 / 事件 / noVNC 代理| D
     D --> L[DeepSeek 模型 API]
-    A <-->|私有桌面动作与 noVNC| W
     subgraph CubeNode["Lima 上的 CubeSandbox"]
         C["控制面 · CubeAPI / CubeMaster"] --> N["节点 · Cubelet / CubeShim / VMM"]
         N -->|启动与恢复| E["每租户 microVM · envd / Bash / Python / Node / apt"]
@@ -53,9 +56,8 @@ flowchart LR
     A <-->|SDK 终端与文件| X
 ```
 
-- **Mac 应用和公网入口。** VPS Nginx 经现有反向隧道转发到同一个产品入口。Mac 上的 TypeScript 应用查 MySQL 得到任务归属，在应用进程内把工具分发给相应的桌面或 Cube。对两个测试账号，Compose 可以预定义桌面，应用按租户映射到固定的私有端点。现有网页的桌面 HTTP/WebSocket 鉴权入口可以复用，后端的 `desktopTarget()` 目前用 CubeProxy 和 `sandbox.getHost(6080)`，需要改为选择 Docker 桌面并使用桌面自己的鉴权。 [桌面代理](../src/server/desktop-proxy.ts) · [租户 VM 对接](../src/server/computer.ts)
-- **Docker 中的 DSH。** 一个可信 Runner 持有模型凭据，会话按 `tenantId/threadId` 持久化。应用经只绑定 Mac 回环地址的私有连接派发任务并接回工具请求。Runner 使用非 root 用户、只读根文件系统及独立会话卷。DSH 只注册任务工具，容器里的本地 shell 不向模型提供。模型和 Runner 均拿不到 Cube 管理凭据或 Docker Socket。共享 Runner 的应用级会话隔离需用两个租户验证。 [DSH 启动代码](../scripts/cube/dsh-runtime/run-task.mjs) · [Docker Engine 安全边界](https://docs.docker.com/engine/security/)
-- **Docker 中的租户桌面。** 每个租户的容器从同一镜像启动，构建时预装 XFCE、Chrome、noVNC 和 Worker，持久卷保存该租户的 Chrome profile。Browser Use 操作桌面上可见的 Chrome，Computer Use 操作同一个 X11 显示，用户通过 noVNC 看见并接管这块屏幕。Worker 在容器内访问 CDP 和 X11，应用只接受约定的动作。每个桌面独立组网，应用通过私有端点访问，桌面无法直接访问其他租户、Runner 或 Cube 管理面。应在 PoC 验证这条网络边界，Compose 默认网络会让服务互通。 [可复用的 Grok 桌面 Worker](https://github.com/cokepoppy/coke-grok-bot/blob/35a134370e95667b1afc78509bf2ff582716bff7/deploy/desktop/computer-worker.mjs) · [Compose 网络](https://docs.docker.com/compose/how-tos/networking/)
+- **Mac 应用和公网入口。** VPS Nginx 经现有反向隧道转发到同一个产品入口。Mac 上的 TypeScript 应用查 MySQL 得到任务归属，再按租户路由至其 Docker 容器和 Cube VM。Docker 桌面端口只绑定 Mac 回环地址，页面的 HTTP/WebSocket 请求由经鉴权的 `desktopTarget()` 转发。VPS 继续只做 Nginx 转发和 SSH 反向隧道。 [桌面代理](../src/server/desktop-proxy.ts) · [租户 VM 对接](../src/server/computer.ts)
+- **Docker 中的租户 DSH 与桌面。** 应用按租户 ID 确定性创建一个 Docker 容器和两个命名卷。构建时预装 DSH、XFCE、Chrome、noVNC 和 Worker。DSH UID 1001 的状态卷与桌面 UID 1000 的工作区/Chrome profile 分开；容器不挂宿主路径或 Docker Socket。模型凭据只注入 DSH 进程，Cube 管理凭据不进入容器。本地 shell/文件工具不注册给模型，`computer_terminal` 只能由应用桥接至 Cube。Browser Use 控制同一容器内可见的 Chrome，Computer Use 操作同一 X11 显示，用户通过 noVNC 看见并接管。每租户单容器网络和端口只对本机应用可见。 [DSH 启动代码](../scripts/cube/dsh-runtime/run-task.mjs) · [Docker Engine 安全边界](https://docs.docker.com/engine/security/)
 - **Cube 控制面和租户 VM。** 应用通过 CubeAPI 请求创建、暂停或恢复，CubeMaster 调度，Lima 节点的 Cubelet、CubeShim 和 VMM 管理 VM。实际终端与文件请求由应用经 SDK、CubeProxy 到对应 VM 的 envd。VM 模板预装 Bash、Python、Node 和 apt，持久化该租户的 `/workspace`。第一个 PoC 可以复用受控测试 VM 的 envd，只启动执行所需组件，省去一次桌面模板构建。这个设计沿用 Cube 现有接口，无需单独的 Bash HTTP 服务或 SSH 端口。 [Cube 架构](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/architecture/overview.md) · [SDK 命令](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/sdk/node/src/commands.ts) · [工作区初始化](../src/server/tenant-workspace.ts)
 
 ### 远程工具如何运行
@@ -99,4 +101,12 @@ Grok Bot 的 `computer_terminal` 调用 `runTaskTerminal()`，后者在 Agent �
 
 PoC 先用新任务、空的桌面测试卷和仅含合成数据的 guest 工作区。旧版将桌面 home 放在 `/workspace/.desktop-home`，直接沿用原工作区会让 guest 命令仍可能读到旧登录态。迁移已有数据时，保留原卷作回退，给新执行环境只导入所需任务文件。旧 Chrome profile 用同版本副本在租户桌面验证，旧 DSH JSONL、附件及目录映射在 Runner 验证。桌面镜像放本地 registry，两个租户复用镜像层，分别计量卷、容器可写层和日志占用。 [旧工作区与 home 配置](../src/server/agent-runtime.ts#L326-L339)
 
-本文是从 `checkpoint-2026-11-27.1`（`077e4a1`）出发的调研设计。目前有固定版本源码、既有项目实现和离线渲染对照可查，上表是新部署待完成的验收项。
+本文从 `checkpoint-2026-11-27.1`（`077e4a1`）出发。当前代码落实每租户一个 Docker DSH/桌面容器、两个命名卷和一台 Cube microVM。Agent Bash 由应用通过带短期 HMAC 令牌的桥接工具调用 Cube SDK。模型凭据与桌面账号通过不同 UID 和目录权限隔开；这减少服务数量，但 Docker 容器内仍有共享内核，Chrome 关闭内部 sandbox 也是已知隔离弱点。若之后安全评估要求浏览器和模型运行环境有容器级边界，再拆成两个容器。
+
+## 实施进度（2026-11-27）
+
+当前功能分支加入 `CSA_DSH_PLACEMENT=docker`：每租户一个 Docker 桌面/DSH 容器、两个命名卷；app 内 HMAC bridge 将 `computer_terminal` 绑定到同租户、同一运行中的 Cube microVM。DSH 工具注册禁用本地 Bash、PowerShell、文件系统和工作目录工具；Docker DSH 状态、launch intent、session JSONL 与 stdout tail 用于故障诊断及避免重复执行。`.4` 通过了 Chrome/CDP、noVNC WebSocket、DSH import smoke、Cube Bash 写读和跨 VM 工作区检查；`.5` 又通过真实 Browser Use 导航、语义标题结果和受控 `h1` fixture。
+
+`.8` 已成功启动 Beta 容器，桌面、Chrome `158.0.8127.88` CDP 和 noVNC WebSocket readiness 均通过。真实 DSH run `e77837a8-01f0-4a5c-8a5d-ffa2009690ae` 用 `computer_terminal` 在 Cube microVM 写入并由 DSH 后续调用读回唯一标记，随后从 Cube Files API 按准确路径独立读回并清理；Browser Use 检查本地 HTML，Computer Use 截图并点击按钮，之后页面状态为 `CLICKED_OK`。任务共 7 个 DSH step、6 次工具调用，约 24.8 秒完成。桌面 UID 1000 不能免密 sudo，也不能读 UID 1001 的私有 DSH 状态目录；DSH 运行状态确实使用 UID 1001。这里验证的是 DSH Computer Use 的自动点击，不是用户通过 noVNC 的可见接管。
+
+`.8` 保留默认 seccomp、`no-new-privileges` 和无宿主挂载/socket；root entrypoint 先启动 system D-Bus。Chrome 以非 root 用户运行且关闭内部 sandbox，以绕过默认 seccomp 对 user namespace 的限制。第一次独立 Files API 查询把 UUID 中的 `e8a9` 误写成 `8e9a`，所以正确返回了“不存在”；按任务 trace 中的准确路径重试后，Files API 独立读回 marker 成功并删除了精确的临时 proof 文件。这是诊断命令的路径抄录错误，不是 Cube Files API 不一致。HTML fixture 也已从 Docker 命名卷清理。noVNC 人工点击、应用/桌面容器重启恢复、Alpha/Beta `.8` 隔离与公网网页端到端验收仍未完成。功能分支默认 `CSA_DSH_PLACEMENT` 已设为 `docker`；`cube` 保留为旧模式；功能完成前不合并或发布。

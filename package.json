@@ -18,6 +18,7 @@
     "macos:install-public-services": "bash scripts/macos/install-public-services.sh",
     "db:migrate": "tsx src/server/migrate.ts",
     "db:seed": "tsx src/server/seed.ts",
+    "docker:desktop-image": "bash scripts/docker/build-csa-docker-desktop-image.sh",
     "cube:desktop-image": "tsx scripts/cube/build-desktop-image.ts",
     "cube:desktop-template": "tsx scripts/cube/create-desktop-template.ts",
     "cube:prepare-dsh-template": "tsx scripts/cube/prepare-dsh-template.ts",

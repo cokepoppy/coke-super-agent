@@ -9,7 +9,23 @@ import type { RunStatus, RunTraceEvent } from '../shared/types.ts';
 import { hasSupportedPiRuntimeContract } from '../shared/pi-runtime-contract.ts';
 import { createPiRuntimeKey } from '../shared/pi-runtime-key.ts';
 import { connectTenantSandbox, getTenantComputer, startTenantComputer } from './computer.ts';
+import { createAgentBridgeToken } from './agent-bridge-token.ts';
 import { config } from './config.ts';
+import {
+  createTenantDockerDshLaunchIntent,
+  ensureTenantDockerDesktop,
+  listTenantDockerDshSessionFiles,
+  probeTenantDockerDesktop,
+  readTenantDockerDshOutput,
+  readTenantDockerDshSession,
+  readTenantDockerDshState,
+  startTenantDockerDshTask,
+  tenantDockerDshLaunchIntentExists,
+  tenantDockerDshProcessIsAlive,
+  tenantDockerDshTaskProcessExists,
+  writeTenantDockerDshInput,
+  type DockerAgentState,
+} from './docker-desktop.ts';
 import { pool } from './db.ts';
 import { runGuestPty, stageRuntimeBundle, startGuestPty } from './runtime-bundle.ts';
 import { appendRunTrace, sanitizeRunTrace, transitionRun } from './task-store.ts';
@@ -158,6 +174,12 @@ async function executeRun(run: PendingRun): Promise<void> {
   if (runtimeEngine !== 'dsh' && runtimeEngine !== 'pi') {
     throw new Error('CSA_AGENT_RUNTIME must be dsh or pi.');
   }
+  if (!['cube', 'docker'].includes(config.agent.dshPlacement)) {
+    throw new Error('CSA_DSH_PLACEMENT must be cube or docker.');
+  }
+  if (config.agent.dshPlacement === 'docker' && runtimeEngine !== 'dsh') {
+    throw new Error('CSA_DSH_PLACEMENT=docker currently requires CSA_AGENT_RUNTIME=dsh.');
+  }
   await trace(run, { component: 'agent-runtime', stage: 'run.start', level: 'info', message: '开始执行任务。' });
   let model: { baseUrl: string; model: string };
   try { model = requireModelConfiguration(); }
@@ -185,6 +207,11 @@ async function executeRun(run: PendingRun): Promise<void> {
   if (stopped) return;
   if (computer.state === 'creating') throw new Error('等待租户 Linux microVM 启动超时，请稍后重试。');
   if (computer.state !== 'running') throw new Error('租户 Linux microVM 启动失败，请到“云电脑”页面检查状态。');
+
+  if (config.agent.dshPlacement === 'docker') {
+    await executeDshRunInDocker(run, model);
+    return;
+  }
 
   const sandbox = await connectTenantSandbox(run.tenant_id);
   try {
@@ -337,6 +364,251 @@ async function executeRun(run: PendingRun): Promise<void> {
     await monitorGuestRun(sandbox, run, { status: 'working', message: runtimeEngine === 'pi' ? 'Pi SDK 已在租户 microVM 中启动。' : 'DeepSeek Harness 已在租户 microVM 中启动。' }, runDirectory, guestHandle);
   } finally {
     sandbox.close();
+  }
+}
+
+async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; model: string }): Promise<void> {
+  const desktopWaitStartedAt = Date.now();
+  const desktopDeadline = desktopWaitStartedAt + 180_000;
+  let computer = await getTenantComputer(run.tenant_id);
+  let lastHeartbeatAt = 0;
+  while (computer.state === 'running' && computer.desktopState === 'installing' && Date.now() < desktopDeadline) {
+    if (stopped) return;
+    if (Date.now() - lastHeartbeatAt >= 15_000) {
+      await trace(run, {
+        component: 'desktop', stage: 'docker.runtime.wait', level: 'info',
+        message: '等待 Docker 中的租户桌面和 Chrome 就绪后启动 DSH。',
+        details: { desktopState: computer.desktopState, elapsedSeconds: Math.floor((Date.now() - desktopWaitStartedAt) / 1000) },
+      });
+      lastHeartbeatAt = Date.now();
+    }
+    await delay(2_000);
+    computer = await getTenantComputer(run.tenant_id);
+  }
+  if (stopped) return;
+  if (computer.state !== 'running') throw new Error('租户 microVM 在 Docker DSH 启动前停止运行。');
+  if (computer.desktopState === 'failed') throw new Error('租户 Docker 桌面启动失败，请在“云电脑”页面检查桌面诊断。');
+  if (computer.desktopState !== 'ready') throw new Error('等待租户 Docker 桌面与 Chrome 就绪超时。');
+
+  const startedAt = Date.now();
+  await trace(run, { component: 'docker', stage: 'container.ensure.start', level: 'info', message: '检查并启动租户专属的 Docker DSH/桌面容器。', details: { image: config.docker.desktopImage } });
+  const target = await ensureTenantDockerDesktop(run.tenant_id);
+  await trace(run, { component: 'docker', stage: 'container.ensure.complete', level: 'info', message: '租户 Docker 容器已运行。', durationMs: Date.now() - startedAt, details: { desktopLoopbackPort: target.port } });
+  const desktopProbeDeadline = Date.now() + 180_000;
+  let desktopProbe = await probeTenantDockerDesktop(run.tenant_id);
+  let lastProbeHeartbeatAt = Date.now();
+  while (!desktopProbe.ready && Date.now() < desktopProbeDeadline) {
+    if (stopped) return;
+    if (Date.now() - lastProbeHeartbeatAt >= 15_000) {
+      await trace(run, {
+        component: 'desktop', stage: 'docker.runtime.health.wait', level: 'info',
+        message: 'Docker 容器已启动，等待 XFCE session、Chrome CDP 与 noVNC WebSocket 同时就绪。',
+        details: { desktopLoopbackPort: target.port, elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000), ...desktopProbe },
+      });
+      lastProbeHeartbeatAt = Date.now();
+    }
+    await delay(2_000);
+    desktopProbe = await probeTenantDockerDesktop(run.tenant_id);
+  }
+  if (!desktopProbe.ready) throw new Error(`租户 Docker 桌面健康探测未通过：${JSON.stringify(desktopProbe)}`);
+  await trace(run, { component: 'desktop', stage: 'docker.runtime.health.ready', level: 'info', message: '已确认租户 Docker 桌面、Chrome CDP 和 noVNC WebSocket 在线，再启动 DSH。', durationMs: Date.now() - startedAt, details: { desktopLoopbackPort: target.port, ...desktopProbe } });
+
+  const cubeTaskWorkspace = `/workspace/tasks/${run.thread_id}`;
+  const workspaceStartedAt = Date.now();
+  await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.start', level: 'info', message: '在租户 microVM 的持久工作区中创建当前任务目录，供 Docker DSH 远端 Bash 使用。', details: { threadId: run.thread_id, cwd: cubeTaskWorkspace } });
+  const sandbox = await connectTenantSandbox(run.tenant_id);
+  try {
+    const prepared = await sandbox.commands.run(
+      `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; /usr/bin/install -d -o 1000 -g "$desktop_gid" -m 0700 ${cubeTaskWorkspace}`,
+      { user: 'root', cwd: '/', timeoutMs: 45_000 },
+    );
+    if (prepared.exitCode !== 0) throw new Error('无法准备租户 microVM 的任务工作目录。');
+  } catch (error) {
+    await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.failed', level: 'error', message: '租户 microVM 任务目录准备失败，未启动 DSH。', durationMs: Date.now() - workspaceStartedAt, details: runtimeErrorDetails(error) });
+    throw error;
+  } finally {
+    sandbox.close();
+  }
+  await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.complete', level: 'info', message: '租户 microVM 任务目录已创建并归属桌面用户。', durationMs: Date.now() - workspaceStartedAt, details: { threadId: run.thread_id, cwd: cubeTaskWorkspace } });
+
+  const existingState = await readTenantDockerDshState(run.tenant_id, run.id);
+  const launchIntentExists = await tenantDockerDshLaunchIntentExists(run.tenant_id, run.id);
+  await trace(run, {
+    component: 'agent-runtime', stage: 'docker.recovery.inspect', level: 'info',
+    message: '检查 Docker 容器中已持久化的 DSH 状态和启动意图，决定恢复、提交结果或启动新进程。',
+    details: { statePresent: existingState !== null, stateStatus: existingState?.status || null, pidPresent: Number.isSafeInteger(existingState?.pid), launchIntentExists },
+  });
+  if (existingState && isTerminalGuestState(existingState.status)) {
+    await publishGuestTraces(run, existingState, 0);
+    await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.terminal-state', level: 'info', message: 'Docker DSH 已写入最终状态；恢复器直接提交结果，不会重新运行任务。', details: { status: existingState.status ?? null } });
+    if (existingState.status === 'failed') await traceDockerDshSessionFailure(run);
+    await persistGuestState(run.tenant_id, run.id, existingState);
+    return;
+  }
+  if (existingState || launchIntentExists) {
+    const alive = existingState?.status === 'working' && Number.isSafeInteger(existingState.pid)
+      ? await tenantDockerDshProcessIsAlive(run.tenant_id, existingState.pid!, run.id)
+      : false;
+    if (alive && existingState) {
+      await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.process.alive', level: 'info', message: '发现仍在运行且任务 ID 匹配的 Docker DSH 进程，将继续监听原任务，不会创建第二个 Agent。', details: { pid: existingState.pid! } });
+      await monitorDockerDshRun(run, existingState);
+      return;
+    }
+    const output = await safeDockerDshOutput(run);
+    await trace(run, { component: 'agent-runtime', stage: 'docker.recovery.fail-closed', level: 'error', message: 'Docker DSH 有既存状态或启动意图，但无法验证原任务仍在运行；为避免重复执行，停止自动重放。', details: { stateStatus: existingState?.status || null, launchIntentExists, pidPresent: Number.isSafeInteger(existingState?.pid), outputTail: output || null } });
+    await transitionRun(run.tenant_id, run.id, 'failed', 'failed', 'Docker 中的任务状态不完整或原进程已退出；为避免重复操作，任务没有自动重放。可以在同一对话中继续。');
+    return;
+  }
+
+  const terminalBridgeToken = createAgentBridgeToken(run.tenant_id, run.id);
+  const terminalBridgeUrl = `http://host.docker.internal:${config.port}/api/internal/agent/terminal`;
+  const inputStartedAt = Date.now();
+  await trace(run, { component: 'docker', stage: 'dsh.input.write.start', level: 'info', message: '安全写入 DSH 任务输入；模型密钥和短期 Cube 工具令牌不会放入 Docker 命令参数或日志。' });
+  await writeTenantDockerDshInput(run.tenant_id, run.id, {
+    threadId: run.thread_id,
+    prompt: run.prompt,
+    baseUrl: model.baseUrl,
+    model: model.model,
+    apiKey: config.agent.apiKey,
+    terminalBridgeUrl,
+    terminalBridgeToken,
+  });
+  await createTenantDockerDshLaunchIntent(run.tenant_id, run.id);
+  await trace(run, { component: 'docker', stage: 'dsh.input.write.complete', level: 'info', message: '任务输入和一次性启动意图已写入租户 runtime 卷。', durationMs: Date.now() - inputStartedAt, details: { inputBytes: Buffer.byteLength(JSON.stringify({ runId: run.id, threadId: run.thread_id, prompt: run.prompt, baseUrl: model.baseUrl, model: model.model })), stateRoot: '/var/lib/csa-agent-runtime' } });
+
+  const launchStartedAt = Date.now();
+  await trace(run, { component: 'dsh', stage: 'docker.harness.launch.start', level: 'info', message: '在租户 Docker 容器中启动 DeepSeek Harness；本地 Bash 和本地文件工具已从 DSH tool registry 禁用。', details: { profile: 'sdk-minimal', model: model.model, remoteTerminal: true, desktopLoopbackPort: target.port } });
+  await startTenantDockerDshTask(run.tenant_id, run.id, run.thread_id);
+  await trace(run, { component: 'dsh', stage: 'docker.harness.launch.complete', level: 'info', message: 'DeepSeek Harness 后台进程已启动，等待 runtime 状态文件和模型事件。', durationMs: Date.now() - launchStartedAt });
+  await monitorDockerDshRun(run, { status: 'working', message: 'DeepSeek Harness 正在 Docker 租户容器中启动。' });
+}
+
+async function monitorDockerDshRun(run: PendingRun, initial: DockerAgentState | null): Promise<void> {
+  let current = initial;
+  let lastMessage = initial?.message || '';
+  let lastTraceSequence = 0;
+  let lastHeartbeatAt = Date.now();
+  let lastProcessCheckAt = 0;
+  let missingStateSince: number | undefined;
+  while (!stopped) {
+    const next = await readTenantDockerDshState(run.tenant_id, run.id);
+    if (next) {
+      missingStateSince = undefined;
+      current = next;
+      lastTraceSequence = await publishGuestTraces(run, next, lastTraceSequence);
+      if (typeof next.message === 'string' && next.message && next.message !== lastMessage && !isTerminalGuestState(next.status)) {
+        lastMessage = next.message;
+        await transitionRun(run.tenant_id, run.id, 'working', 'progress', next.message);
+      }
+      if (isTerminalGuestState(next.status)) {
+        if (next.status === 'failed') await traceDockerDshSessionFailure(run);
+        await persistGuestState(run.tenant_id, run.id, next);
+        const exitDeadline = Date.now() + guestTerminalExitGraceMs;
+        let processExited = false;
+        while (Date.now() < exitDeadline && Number.isSafeInteger(next.pid)) {
+          if (!await tenantDockerDshProcessIsAlive(run.tenant_id, next.pid!, run.id)) { processExited = true; break; }
+          await delay(1000);
+        }
+        await trace(run, {
+          component: 'agent-runtime', stage: processExited ? 'docker.process.terminal-exit.complete' : 'docker.process.terminal-exit.timeout',
+          level: processExited ? 'info' : 'warning',
+          message: processExited ? 'Docker DSH 进程已在最终状态写入后退出。' : 'Docker DSH 已写入最终状态，但进程未在清理宽限期内退出。',
+          details: { pid: next.pid ?? null, graceMs: guestTerminalExitGraceMs },
+        });
+        return;
+      }
+      if (next.status === 'working' && Number.isSafeInteger(next.pid) && Date.now() - lastProcessCheckAt >= 15_000) {
+        lastProcessCheckAt = Date.now();
+        if (!await tenantDockerDshProcessIsAlive(run.tenant_id, next.pid!, run.id)) {
+          const finalState = await waitForDockerDshTerminalState(run, 8_000);
+          if (finalState) {
+            lastTraceSequence = await publishGuestTraces(run, finalState, lastTraceSequence);
+            if (finalState.status === 'failed') await traceDockerDshSessionFailure(run);
+            await persistGuestState(run.tenant_id, run.id, finalState);
+            return;
+          }
+          await failDockerDshRun(run, 'Docker DSH 进程已退出，但没有写出可读取的最终状态；为避免重复操作，任务没有自动重放。', 'docker.process.missing', current);
+          return;
+        }
+      }
+    } else {
+      missingStateSince ??= Date.now();
+      const processExists = await tenantDockerDshTaskProcessExists(run.tenant_id, run.id).catch(() => false);
+      if (!processExists && Date.now() - missingStateSince >= 8_000) {
+        await failDockerDshRun(run, 'Docker DSH 启动进程已退出，且没有写出可读取的最终状态；为避免重复操作，任务没有自动重放。', 'docker.state.missing', current);
+        return;
+      }
+    }
+    if (Date.now() - lastHeartbeatAt >= 30_000) {
+      await trace(run, { component: 'agent-runtime', stage: 'docker.run.heartbeat', level: 'info', message: 'Docker DSH 任务仍在运行，继续轮询持久化状态与 trace。', details: { stateStatus: current?.status || 'starting', elapsedSeconds: Math.floor((Date.now() - lastHeartbeatAt) / 30_000) * 30 } });
+      lastHeartbeatAt = Date.now();
+    }
+    await delay(1200);
+  }
+}
+
+async function waitForDockerDshTerminalState(run: PendingRun, timeoutMs: number): Promise<DockerAgentState | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await readTenantDockerDshState(run.tenant_id, run.id);
+    if (state && isTerminalGuestState(state.status)) return state;
+    await delay(500);
+  }
+  return null;
+}
+
+async function failDockerDshRun(run: PendingRun, message: string, stage: string, state: DockerAgentState | null): Promise<void> {
+  const outputTail = await safeDockerDshOutput(run);
+  await trace(run, {
+    component: 'agent-runtime', stage, level: 'error', message,
+    details: { pid: state?.pid ?? null, runtimeStage: state?.stage || null, outputTail: outputTail || null },
+  });
+  const outputContext = outputTail ? `\n\nDocker DSH stdout/stderr 尾部：\n${outputTail}` : '';
+  await transitionRun(run.tenant_id, run.id, 'failed', 'failed', message + outputContext);
+}
+
+async function safeDockerDshOutput(run: PendingRun): Promise<string> {
+  try { return redactRuntimeBuildOutput(await readTenantDockerDshOutput(run.tenant_id, run.id)); }
+  catch { return ''; }
+}
+
+async function traceDockerDshSessionFailure(run: PendingRun): Promise<void> {
+  try {
+    const files = await listTenantDockerDshSessionFiles(run.tenant_id, run.thread_id);
+    const file = files[0];
+    if (!file) {
+      await trace(run, { component: 'dsh', stage: 'harness.session.diagnostic.missing', level: 'warning', message: 'Docker DSH 任务失败后没有找到 session JSONL。', details: { sessionId: run.thread_id } });
+      return;
+    }
+    const contents = await readTenantDockerDshSession(run.tenant_id, run.thread_id, file);
+    if (!contents) {
+      await trace(run, { component: 'dsh', stage: 'harness.session.diagnostic.skipped', level: 'warning', message: 'Docker DSH session JSONL 为空、不可读或超过 8 MiB 诊断上限。', details: { sessionFile: file } });
+      return;
+    }
+    let failure: { kind: string; code?: string; status?: number; message?: string } | undefined;
+    for (const line of contents.split('\n').filter(Boolean).slice(-400)) {
+      try {
+        const event = JSON.parse(line) as { type?: unknown; data?: { reason?: { kind?: unknown; error?: { code?: unknown; status?: unknown; statusCode?: unknown; message?: unknown } } } };
+        if (event.type !== 'turn/end') continue;
+        const reason = event.data?.reason;
+        const error = reason?.error;
+        if (reason && ['error', 'failed', 'timeout'].includes(String(reason.kind))) {
+          failure = {
+            kind: String(reason.kind).slice(0, 40),
+            ...(typeof error?.code === 'string' || typeof error?.code === 'number' ? { code: String(error.code).slice(0, 100) } : {}),
+            ...(Number.isSafeInteger(Number(error?.status ?? error?.statusCode)) ? { status: Number(error?.status ?? error?.statusCode) } : {}),
+            ...(typeof error?.message === 'string' ? { message: redactRuntimeBuildOutput(error.message).slice(0, 500) } : {}),
+          };
+        }
+      } catch { /* Ignore partial JSONL tail lines. */ }
+    }
+    if (!failure) {
+      await trace(run, { component: 'dsh', stage: 'harness.session.diagnostic.unresolved', level: 'warning', message: 'Docker DSH session 中没有找到带错误原因的 turn/end。', details: { sessionFile: file, sessionBytes: Buffer.byteLength(contents) } });
+      return;
+    }
+    await trace(run, { component: 'dsh', stage: 'harness.session.failure', level: 'error', message: `DSH session turn/end 报告 ${failure.kind}${failure.code ? ` ${failure.code}` : ''}${failure.status ? ` HTTP ${failure.status}` : ''}${failure.message ? `: ${failure.message}` : ''}`.slice(0, 1200), details: { sessionId: run.thread_id, sessionFile: file, ...failure } });
+  } catch (error) {
+    await trace(run, { component: 'dsh', stage: 'harness.session.diagnostic.failed', level: 'warning', message: '读取 Docker DSH session JSONL 诊断时失败。', details: runtimeErrorDetails(error) });
   }
 }
 

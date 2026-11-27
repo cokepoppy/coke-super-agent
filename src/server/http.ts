@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { extname, posix, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { verifyAgentBridgeToken } from './agent-bridge-token.ts';
 import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie } from './auth.ts';
 import { pool } from './db.ts';
 import { config } from './config.ts';
@@ -51,13 +52,13 @@ function json(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, maxBytes = bodyLimit): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += value.byteLength;
-    if (total > bodyLimit) throw new HttpError(413, '请求内容过大');
+    if (total > maxBytes) throw new HttpError(413, '请求内容过大');
     chunks.push(value);
   }
   if (total === 0) return {};
@@ -198,6 +199,82 @@ export function createHttpServer() {
       if (method === 'GET' && url.pathname === '/health') {
         await pool.query('SELECT 1');
         json(res, 200, { status: 'ok', database: 'ok' });
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/internal/agent/terminal') {
+        const authorization = req.headers.authorization || '';
+        const tokenMatch = typeof authorization === 'string' ? authorization.match(/^Bearer ([A-Za-z0-9_.-]{40,2048})$/) : null;
+        const claims = tokenMatch ? verifyAgentBridgeToken(tokenMatch[1]) : null;
+        if (!claims) throw new HttpError(401, 'Agent bridge token 无效或已过期');
+        const body = await readJson(req, 128 * 1024);
+        const command = body.command;
+        const cwd = body.cwd;
+        const timeoutMs = body.timeoutMs;
+        if (typeof command !== 'string' || !command.trim() || command.includes('\0') || Buffer.byteLength(command, 'utf8') > 64 * 1024) {
+          throw new HttpError(400, '远端 Bash 命令无效');
+        }
+        if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.includes('\0') || cwd.length > 4096) {
+          throw new HttpError(400, '远端 Bash 工作目录无效');
+        }
+        if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1_000 || Number(timeoutMs) > 900_000) {
+          throw new HttpError(400, '远端 Bash 超时参数无效');
+        }
+        const [runs] = await pool.execute<Array<{ tenant_id: string; status: string } & import('mysql2/promise').RowDataPacket>>(
+          'SELECT tenant_id, status FROM runs WHERE id = ? LIMIT 1',
+          [claims.runId],
+        );
+        if (!runs[0] || runs[0].tenant_id !== claims.tenantId) throw new HttpError(404, '任务不存在');
+        if (runs[0].status !== 'working') throw new HttpError(409, '任务当前不接受终端操作');
+        const startedAt = Date.now();
+        let executionStage = 'cube.connect';
+        let sandbox: Awaited<ReturnType<typeof connectTenantSandbox>> | undefined;
+        try {
+          sandbox = await connectTenantSandbox(claims.tenantId);
+          executionStage = 'cube.commands.run';
+          const result = await sandbox.commands.run(command, { user: 'root', cwd, timeoutMs: Number(timeoutMs) });
+          const maxOutputBytes = 48 * 1024;
+          const bounded = (value: string): { text: string; truncated: boolean } => {
+            const data = Buffer.from(value || '', 'utf8');
+            if (data.byteLength <= maxOutputBytes) return { text: value || '', truncated: false };
+            return { text: data.subarray(0, maxOutputBytes).toString('utf8'), truncated: true };
+          };
+          const stdout = bounded(result.stdout || '');
+          const stderr = bounded(result.stderr || '');
+          const outputBytes = Buffer.byteLength(result.stdout || '') + Buffer.byteLength(result.stderr || '');
+          writeHttpLog('agent.bridge.terminal.complete', 'info', {
+            requestId,
+            tenantId: claims.tenantId,
+            runId: claims.runId,
+            cwd,
+            timeoutMs,
+            commandBytes: Buffer.byteLength(command, 'utf8'),
+            durationMs: Date.now() - startedAt,
+            exitCode: result.exitCode,
+            outputBytes,
+            outputTruncated: stdout.truncated || stderr.truncated,
+          });
+          json(res, 200, {
+            exitCode: result.exitCode,
+            durationMs: Date.now() - startedAt,
+            stdout: stdout.text,
+            stderr: stderr.text,
+            outputTruncated: stdout.truncated || stderr.truncated,
+          });
+        } catch (error) {
+          writeHttpLog('agent.bridge.terminal.failed', 'error', {
+            requestId,
+            tenantId: claims.tenantId,
+            runId: claims.runId,
+            executionStage,
+            cwd,
+            timeoutMs,
+            commandBytes: Buffer.byteLength(command, 'utf8'),
+            durationMs: Date.now() - startedAt,
+            ...safeHttpError(error),
+          });
+          throw error;
+        } finally { sandbox?.close(); }
         return;
       }
 

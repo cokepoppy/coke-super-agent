@@ -36,8 +36,16 @@ export const config = {
     limaCommand: process.env.CSA_LIMACTL || join(homedir(), 'Library/Application Support/Coke Super Agent/lab/lima-2.3.0/bin/limactl'),
     limaHome: process.env.LIMA_HOME || join(homedir(), '.local/share/csa-cube-node/lima'),
   },
+  docker: {
+    executable: process.env.CSA_DOCKER_EXECUTABLE || 'docker',
+    desktopImage: process.env.CSA_DOCKER_DESKTOP_IMAGE || 'csa-super-agent-desktop:20261127.8',
+    desktopCpus: process.env.CSA_DOCKER_DESKTOP_CPUS || '2',
+    desktopMemory: process.env.CSA_DOCKER_DESKTOP_MEMORY || '3g',
+    desktopShmSize: process.env.CSA_DOCKER_DESKTOP_SHM_SIZE || '1g',
+  },
   agent: {
     runtime: (process.env.CSA_AGENT_RUNTIME || 'dsh').trim().toLowerCase(),
+    dshPlacement: (process.env.CSA_DSH_PLACEMENT || 'docker').trim().toLowerCase(),
     apiKey: process.env.DEEPSEEK_API_KEY || '',
     baseUrl: deepseekBaseUrl,
     piBaseUrl: piDeepseekBaseUrl,
