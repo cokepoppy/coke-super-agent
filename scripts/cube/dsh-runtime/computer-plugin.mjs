@@ -98,9 +98,10 @@ export async function waitForBrowserActionSettle(options) {
       stableSamples = fingerprint === lastFingerprint ? stableSamples + 1 : 0;
       lastFingerprint = fingerprint;
       const ready = latestState.readyState === 'interactive' || latestState.readyState === 'complete';
+      const pageText = String(latestState.text || '').trim();
+      const loadingPlaceholder = /(?:\bloading\b|加载中|正在加载|请稍候)/i.test(pageText);
       const hasObservableContent = !requireObservableContent
-        || Boolean(String(latestState.text || '').trim())
-        || Number(latestState.visibleControlCount || 0) > 0;
+        || (!loadingPlaceholder && (Boolean(pageText) || Number(latestState.visibleControlCount || 0) > 0));
       if (now() - startedAt >= minWaitMs && ready && stableSamples >= 2 && hasObservableContent) {
         const urlChanged = Boolean(latestState.url && latestState.url !== initialUrl);
         const navigationObserved = Number(latestState.navigationSerial || 0) > initialNavigationSerial;
@@ -294,8 +295,8 @@ export function apply(ctx) {
             readTargets: () => readCdpTargets(1500),
             readPage: observePageForSettlement,
             connectTarget: connectPageTarget,
-            timeoutMs: 5000,
-            minWaitMs: 1200,
+            timeoutMs: 15000,
+            minWaitMs: 2000,
             pollIntervalMs: 200,
             inspectPage,
           });
@@ -367,7 +368,7 @@ export function apply(ctx) {
         await scrollBrowserPage(page, Number(args.deltaX || 0), Number(args.deltaY || 500));
       }
 
-      const settled = await waitForBrowserActionSettle({
+      const settled = await settleAndInspectBrowserPage({
         page,
         previousTargetIds,
         initialUrl,
@@ -379,9 +380,9 @@ export function apply(ctx) {
         timeoutMs: 5000,
         minWaitMs: 1200,
         pollIntervalMs: 200,
+        inspectPage,
       });
-      page = settled.page;
-      const result = await inspectPage(page);
+      const result = settled.result;
       const actionState = {
         settled: settled.settled,
         pageChanged: settled.pageChanged,

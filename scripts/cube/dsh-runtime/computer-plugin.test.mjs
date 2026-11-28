@@ -172,3 +172,34 @@ test('inspects and returns the page selected by navigation settlement', async ()
   assert.equal(result.result.title, '搜索结果');
   assert.equal(result.settled, true);
 });
+
+test('waits beyond the initial loading state for a slow search results page', async () => {
+  const clock = fakeClock();
+  let inspectedText = '';
+  const result = await settleAndInspectBrowserPage({
+    page: { targetId: 'taobao' },
+    previousTargetIds: new Set(['taobao']),
+    initialUrl: 'about:blank',
+    initialText: '',
+    requireObservableContent: true,
+    readTargets: async () => [{ id: 'taobao', type: 'page', url: 'https://s.taobao.com/search?q=mouse' }],
+    readPage: async () => clock.now() < 6_000
+      ? { url: 'https://s.taobao.com/search?q=mouse', title: '', readyState: 'complete', text: '加载中…', visibleControlCount: 19, navigationSerial: 1 }
+      : { url: 'https://s.taobao.com/search?q=mouse', title: '淘宝搜索', readyState: 'complete', text: '无线鼠标 商品 ¥99', visibleControlCount: 19, navigationSerial: 1 },
+    connectTarget: async target => ({ targetId: target.id }),
+    inspectPage: async page => {
+      inspectedText = clock.now() >= 6_000 ? '无线鼠标 商品 ¥99' : '加载中…';
+      return { title: '淘宝搜索', url: 'https://s.taobao.com/search?q=mouse', text: inspectedText, targetId: page.targetId };
+    },
+    timeoutMs: 15_000,
+    minWaitMs: 2_000,
+    pollIntervalMs: 250,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  assert.equal(result.settled, true);
+  assert.ok(result.elapsedMs >= 6_000);
+  assert.equal(result.result.text, '无线鼠标 商品 ¥99');
+  assert.equal(inspectedText, '无线鼠标 商品 ¥99');
+});
