@@ -52,4 +52,13 @@ These defects explain why the tool result could be stale or incomplete. They do 
 - DSH runtime tests: 4 passed, including route stabilization and the bounded 40-step/25-minute task budget.
 - After the `.3` workspace change, TypeScript/Vite build passed, desktop readiness tests passed (5), and DSH runtime tests passed (4).
 - Release deploy/rollback shell syntax and `git diff --check`: passed.
-- Public UI acceptance for a fresh Tetris artifact and a real Taobao product-results page: pending deployment of `.3`.
+- Public UI acceptance for a fresh Tetris artifact and a real Taobao product-results page: still pending.
+
+### `.3` public retest and runtime assembly timeout
+
+- The `.3` deploy script stopped while waiting for `com.coke.super-agent.api` to unload. The API label disappeared after the script's 3-second wait window; both `.3` LaunchAgents were then installed and bootstrapped manually. API, local web, public health, and listener identity checks confirmed both services were running from `.3/source` and `.3/web`. The release script wait window is now 30 seconds for the next deployment.
+- Signed-in Chrome submitted a fresh Tetris task through the public UI: `c1160736-3b64-4b3e-9530-f339605a9a94`. The `.3` PTY workspace setup passed in 16.5 seconds and logged `guest.workspace.ready`; this confirms the `.2` envd deadline failure is no longer the blocker.
+- The runtime cache was a host-side hit and the 143,809,985-byte Linux ARM64 DSH archive was prepared in 1.2 seconds. The configured base template, `coke-super-agent-desktop-pipe-retry-20261125`, had no matching DSH runtime markers in the guest, so the first task had to cold-transfer the bundle.
+- All 35 upload chunks reached the microVM. The guest then concatenated them slowly: `csa_bundle_assembly 8/35` at 04:14:08Z, `16/35` at 04:15:55Z, and `24/35` at 04:19:13Z. `stageRuntimeBundle()` stopped the operation at its 10-minute assembly deadline; the run failed at 04:23:01Z with `等待 microVM 拼接并校验依赖包超过 10 分钟。` No `harness.step.start` was recorded, so this is not evidence of a DSH model or step-budget failure, and no fresh artifact was created.
+- The measured guest assembly time is much slower than expected for this 144 MB file. The source now allows up to 20 minutes for this bounded assembly and logs a guest milestone every four chunks instead of every eight. This raises the limit based on observed throughput; a DSH-prepared template remains the way to avoid repeating a cold transfer for every new tenant VM.
+- After this adjustment, TypeScript/Vite production build passed, DSH runtime tests passed (4), desktop-readiness tests passed (5), and release `.4` deploy/rollback scripts passed `bash -n`. A fresh product UI retest is still required after deploying `.4`.
