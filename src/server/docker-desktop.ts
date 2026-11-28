@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { BrowserState, RunTraceEvent } from '../shared/types.ts';
+import type { ProactiveTicketContext } from '../shared/proactive.ts';
 import { config } from './config.ts';
 import { resolveDockerBrowserStatus } from './docker-browser-status.ts';
 import { claimDockerDshLaunchIntentScript } from './docker-dsh-launch-intent.ts';
@@ -39,6 +40,7 @@ export interface DockerAgentTaskInput {
   apiKey: string;
   terminalBridgeUrl: string;
   terminalBridgeToken: string;
+  proactive?: ProactiveTicketContext;
 }
 
 export interface DockerAgentState {

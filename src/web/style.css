@@ -189,6 +189,49 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .activity-error { padding: 8px 10px; border-radius: 7px; background: #fff3f1; color: #a43d36; font-size: 10px; }
 .muted, .empty-card { color: #9b98a0; font-size: 11px; }
 .empty-card { max-width: 930px; margin: auto; padding: 22px; }
+.proactive-page { padding-bottom: 28px; }
+.proactive-layout { max-width: 1050px; margin: 0 auto; display: grid; grid-template-columns: minmax(280px, .82fr) minmax(360px, 1.18fr); align-items: start; gap: 15px; }
+.proactive-create-card, .proactive-rules-card, .proactive-history-card { min-width: 0; padding: 17px; border: 1px solid #edebe8; border-radius: 12px; background: #fff; }
+.proactive-create-card { display: grid; gap: 13px; }
+.proactive-create-card>div:first-child, .proactive-rules-card>header, .proactive-history-card>header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.proactive-create-card>div:first-child>h2, .proactive-rules-card h2, .proactive-history-card h2 { display: inline; margin: 0; color: #514d57; font-size: 12px; font-weight: 650; }
+.proactive-step { display: inline-grid; width: 23px; height: 23px; place-items: center; margin-right: 7px; border-radius: 7px; background: #f2eef8; color: #725f91; font: 650 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; vertical-align: middle; }
+.proactive-create-card label { display: grid; gap: 6px; color: #716e77; font-size: 10px; font-weight: 600; }
+.proactive-create-card input, .proactive-create-card textarea, .proactive-create-card select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #e6e3e0; border-radius: 8px; background: #fff; color: #37343c; font-size: 11px; font-weight: 400; }
+.proactive-create-card input, .proactive-create-card select { height: 36px; }
+.proactive-create-card textarea { min-height: 100px; resize: vertical; line-height: 1.55; }
+.proactive-form-row { display: grid; grid-template-columns: minmax(80px, .7fr) minmax(140px, 1.3fr); gap: 10px; }
+.proactive-mode-hint { display: grid; gap: 4px; padding: 10px; border: 1px solid #ece9f0; border-radius: 8px; background: #fbfafe; }
+.proactive-mode-hint strong { color: #67557f; font-size: 10px; }
+.proactive-mode-hint span { color: #89848f; font-size: 9px; line-height: 1.5; }
+.proactive-submit { min-height: 36px; }
+.proactive-list-column { min-width: 0; display: grid; gap: 13px; }
+.proactive-rules-card>header, .proactive-history-card>header { margin-bottom: 9px; }
+.proactive-rules-card>header>span { color: #a19da6; font-size: 9px; }
+.proactive-rule-list, .proactive-occurrence-list { display: grid; }
+.proactive-rule { padding: 12px 0 9px; border-top: 1px solid #f0efed; }
+.proactive-rule-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.proactive-rule-top>div { min-width: 0; display: grid; gap: 4px; }
+.proactive-rule-top strong, .proactive-occurrence strong { overflow: hidden; color: #55515b; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.proactive-rule-top small, .proactive-occurrence small { color: #9c98a1; font-size: 9px; }
+.proactive-mode-badge { padding: 4px 7px; border-radius: 12px; font-size: 8px; flex: none; }
+.proactive-mode-badge.observe { background: #f1f0ed; color: #77736e; }
+.proactive-mode-badge.active { background: #e6f5ec; color: #3f805b; }
+.proactive-rule>p { margin: 8px 0; color: #79757f; font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.proactive-rule-meta { display: grid; gap: 3px; color: #9a96a0; font-size: 9px; }
+.proactive-rule-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 7px; }
+.proactive-rule-actions button, .proactive-occurrence button { min-height: 25px; padding: 0 8px; border: 1px solid #e8e5e9; border-radius: 7px; background: #fff; color: #77717f; font-size: 9px; cursor: pointer; }
+.proactive-rule-actions button:hover:not(:disabled), .proactive-occurrence button:hover { border-color: #cfc3df; color: #5a4775; }
+.proactive-rule-actions .confirm-delete { border-color: #e9b6b1; background: #fff5f3; color: #a13b35; }
+.proactive-rule-actions button:disabled { opacity: .6; cursor: wait; }
+.proactive-history-card { padding-bottom: 8px; }
+.proactive-occurrence { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 0; border-top: 1px solid #f0efed; }
+.proactive-occurrence>div { min-width: 0; display: grid; gap: 4px; }
+.proactive-occurrence.queued { border-left: 3px solid #69b788; padding-left: 8px; }
+.proactive-occurrence.skipped_busy { border-left: 3px solid #d5aa59; padding-left: 8px; }
+.proactive-empty { margin: 0; padding: 9px 2px; color: #9b98a0; font-size: 10px; line-height: 1.6; }
+.proactive-error { max-width: 1050px; margin: 0 auto 12px; padding: 9px 12px; border: 1px solid #efc3bf; border-radius: 8px; background: #fff5f3; color: #a43d37; font-size: 10px; }
+.proactive-footnote { max-width: 1050px; margin: 12px auto 0; color: #a19da6; font-size: 9px; line-height: 1.6; }
 
 .computer-page { display: grid; place-items: center; background: radial-gradient(ellipse at 50% 43%, #fafaf8 0, #fff 61%); }
 .computer-page.desktop-ready { width: 100%; display: flex; min-width: 0; min-height: 0; flex: 1 1 0%; overflow: hidden; padding: 0; background: #f3f3f2; }
@@ -261,6 +304,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
   .composer { width: calc(100% - 24px); margin-bottom: 12px; }
   .content-page { padding: 28px 16px; }
   .activity-layout { grid-template-columns: 1fr; }
+  .proactive-layout { grid-template-columns: 1fr; }
+  .proactive-create-card, .proactive-rules-card, .proactive-history-card { padding: 13px; }
   .activity-events { min-height: 180px; }
   .computer-page { padding: 28px 20px; }
 }

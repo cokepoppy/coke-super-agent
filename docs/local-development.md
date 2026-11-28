@@ -78,7 +78,7 @@ Pi 试验先沿用 Coke Dots/Grok Bot 已用过的 `@mariozechner/pi-coding-agen
 
 - 登录、登出、任务保存、历史读取和 SSE 事件已连接 MySQL。
 - 服务端按会话中的租户 ID 过滤任务。Alice 与 Bob 可用于验证租户边界。
-- CubeSandbox SDK 提供每租户一台 microVM 的启动和恢复入口。标准路径先在 ARM64 OCI 镜像构建阶段预装 XFCE、Google Chrome、Node.js、Python、apt 和 DSH/Pi runtime，再由 Cube 创建模板；租户启动只校验镜像清单并启动桌面会话，不在 microVM 启动时安装这些基础软件。apt 仍可供用户在桌面里安装额外 Linux 包。
+- CubeSandbox SDK 提供每租户一台 microVM 的启动和恢复入口。Cube guest 只承载远程 Bash、Python/Node 命令和租户工作区；它不包含 DSH/Pi Agent Runtime、XFCE、Chrome 或 noVNC。桌面、浏览器和 DSH Harness 由每租户 Docker 镜像预装，Agent 通过 TypeScript 应用桥接到 Cube microVM 执行远程命令；用户可在远程工作区内用 apt 安装额外软件。
 - 租户 microVM 开启公网 IPv4 出站（`allowInternetAccess: true`），允许 Browser Use、Computer Use 和终端直接工作；登录与验证码由用户接管。创建请求不使用 `allowOut: 0.0.0.0/0`，以保留 Cube 对宿主及租户内网的默认保护。Cube 按允许规则优先于拒绝规则的顺序处理网络策略，具体隔离效果需要在数据面实测。 [CubeSandbox 网络策略](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/network-policy.md)
 - `CSA_DESKTOP_RESOLUTION` 同时设置虚拟显示器和 Computer Use 坐标边界，默认 `1280x800`。
 - Coke Super Agent 服务为每个租户串行调度任务；Agent Runtime 固定为 DeepSeek Harness，`CSA_DSH_PLACEMENT=docker` 是唯一支持的运行位置。每租户一个 DSH/图形桌面容器和两个宿主命名卷，DSH 通过应用桥接工具访问单独的 Cube microVM；状态文件、启动意图、Docker 进程身份和 session JSONL 用于应用重启后的任务对账。`cube` placement 会在应用启动时被拒绝。

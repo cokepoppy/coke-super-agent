@@ -13,6 +13,7 @@ import { config } from './config.ts';
 import { migrate } from './migrate.ts';
 import { seedLocalTenants } from './seed.ts';
 import { encryptSandboxTrafficToken } from './token-crypto.ts';
+import { dispatchDueProactiveRules, getProactiveTicketContext } from './proactive-store.ts';
 
 after(async () => { await pool.end(); });
 
@@ -194,6 +195,152 @@ test('local tenant tasks and persisted events stay isolated across demo accounts
         const response = await fetch(origin + '/api/auth/logout', { method: 'POST', headers: { cookie: value, origin, 'content-type': 'application/json' }, body: '{}' });
         assert.equal(response.status, 200);
       }
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test('proactive rules are tenant isolated and dispatch idempotent Observe and active Tickets', async () => {
+  const alphaPassword = process.env.CSA_TEST_PASSWORD_ALPHA || '';
+  const betaPassword = process.env.CSA_TEST_PASSWORD_BETA || '';
+  assert.ok(alphaPassword.length >= 10, 'external local env must provide the Alpha test password');
+  assert.ok(betaPassword.length >= 10, 'external local env must provide the Beta test password');
+  await migrate();
+  await seedLocalTenants();
+
+  const server = createHttpServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address() as AddressInfo;
+  const origin = `http://127.0.0.1:${address.port}`;
+  let alphaCookie = '';
+  let betaCookie = '';
+  let tenantId = '';
+  const ruleIds: string[] = [];
+  const runIds: string[] = [];
+  const threadIds: string[] = [];
+
+  async function doLogin(username: string, password: string): Promise<string> {
+    const response = await fetch(`${origin}/api/auth/login`, {
+      method: 'POST', headers: { origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    assert.equal(response.status, 200);
+    return cookie(response);
+  }
+
+  try {
+    alphaCookie = await doLogin('alice', alphaPassword);
+    betaCookie = await doLogin('bob', betaPassword);
+    assert.equal((await fetch(`${origin}/api/proactive/rules`)).status, 401);
+    const alphaSession = await fetch(`${origin}/api/auth/session`, { headers: { cookie: alphaCookie } });
+    tenantId = (await alphaSession.json() as { session: { tenant: { id: string } } }).session.tenant.id;
+
+    const crossOrigin = await fetch(`${origin}/api/proactive/rules`, {
+      method: 'POST', headers: { cookie: alphaCookie, origin: 'https://unrelated.example', 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'blocked', prompt: 'observe', intervalMinutes: 1 }),
+    });
+    assert.equal(crossOrigin.status, 403);
+
+    const invalid = await fetch(`${origin}/api/proactive/rules`, {
+      method: 'POST', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'invalid', prompt: 'observe', intervalMinutes: 0, mode: 'active' }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const observeResponse = await fetch(`${origin}/api/proactive/rules`, {
+      method: 'POST', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Observe BSE page', prompt: 'Read the public rules page and report changes.', intervalMinutes: 1 }),
+    });
+    assert.equal(observeResponse.status, 201);
+    const observeRule = (await observeResponse.json() as { rule: { id: string; mode: string; enabled: boolean } }).rule;
+    ruleIds.push(observeRule.id);
+    assert.equal(observeRule.mode, 'observe');
+    assert.equal(observeRule.enabled, true);
+    const betaRules = await fetch(`${origin}/api/proactive/rules`, { headers: { cookie: betaCookie } });
+    assert.deepEqual((await betaRules.json() as { rules: unknown[] }).rules, []);
+    const crossTenantPatch = await fetch(`${origin}/api/proactive/rules/${observeRule.id}`, {
+      method: 'PATCH', headers: { cookie: betaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(crossTenantPatch.status, 404);
+
+    const pause = await fetch(`${origin}/api/proactive/rules/${observeRule.id}`, {
+      method: 'PATCH', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal((await pause.json() as { rule: { enabled: boolean } }).rule.enabled, false);
+    const resume = await fetch(`${origin}/api/proactive/rules/${observeRule.id}`, {
+      method: 'PATCH', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal((await resume.json() as { rule: { enabled: boolean } }).rule.enabled, true);
+
+    await pool.execute('UPDATE proactive_rules SET next_run_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 2 SECOND) WHERE id = ? AND tenant_id = ?', [observeRule.id, tenantId]);
+    const observed = await dispatchDueProactiveRules(new Date());
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]?.outcome, 'observed');
+    assert.equal(observed[0]?.runId, undefined);
+
+    const activeResponse = await fetch(`${origin}/api/proactive/rules`, {
+      method: 'POST', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Read BSE rules', prompt: 'Open the public BSE rule index and summarize the latest published rule title.', intervalMinutes: 1, mode: 'active' }),
+    });
+    assert.equal(activeResponse.status, 201);
+    const activeRule = (await activeResponse.json() as { rule: { id: string; mode: string } }).rule;
+    ruleIds.push(activeRule.id);
+    assert.equal(activeRule.mode, 'active');
+    await pool.execute('UPDATE proactive_rules SET next_run_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 2 SECOND) WHERE id = ? AND tenant_id = ?', [activeRule.id, tenantId]);
+    const concurrent = await Promise.all([dispatchDueProactiveRules(new Date()), dispatchDueProactiveRules(new Date())]);
+    const queued = concurrent.flat();
+    assert.equal(queued.filter(item => item.ruleId === activeRule.id).length, 1);
+    const ticket = queued.find(item => item.ruleId === activeRule.id);
+    assert.equal(ticket?.outcome, 'queued');
+    assert.ok(ticket?.runId);
+    runIds.push(ticket!.runId!);
+    const [runRows] = await pool.execute<RowDataPacket[]>('SELECT thread_id, status, prompt FROM runs WHERE id = ? AND tenant_id = ?', [ticket!.runId, tenantId]);
+    assert.equal(runRows[0]?.status, 'queued');
+    assert.equal(runRows[0]?.prompt, 'Open the public BSE rule index and summarize the latest published rule title.');
+    threadIds.push(String(runRows[0]?.thread_id));
+    const context = await getProactiveTicketContext(tenantId, ticket!.runId!);
+    assert.equal(context?.ticketId, ticket?.occurrenceId);
+    assert.equal(context?.ruleName, 'Read BSE rules');
+    assert.equal(context?.source, 'schedule');
+    const editRule = await fetch(`${origin}/api/proactive/rules/${activeRule.id}`, {
+      method: 'PATCH', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Edited future rule', prompt: 'A later mandate.' }),
+    });
+    assert.equal(editRule.status, 200);
+    const frozenContext = await getProactiveTicketContext(tenantId, ticket!.runId!);
+    assert.equal(frozenContext?.ruleName, 'Read BSE rules');
+    assert.equal(frozenContext?.mandate, 'Open the public BSE rule index and summarize the latest published rule title.');
+    const deleteOutstanding = await fetch(`${origin}/api/proactive/rules/${activeRule.id}`, {
+      method: 'DELETE', headers: { cookie: alphaCookie, origin, 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(deleteOutstanding.status, 409);
+
+    await pool.execute('UPDATE proactive_rules SET next_run_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE id = ? AND tenant_id = ?', [activeRule.id, tenantId]);
+    const skipped = await dispatchDueProactiveRules(new Date());
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0]?.ruleId, activeRule.id);
+    assert.equal(skipped[0]?.outcome, 'skipped_busy');
+    assert.equal(skipped[0]?.runId, undefined);
+
+    const alphaList = await fetch(`${origin}/api/proactive/rules`, { headers: { cookie: alphaCookie } });
+    const state = await alphaList.json() as { rules: Array<{ id: string }>; occurrences: Array<{ ruleId: string; outcome: string; runId: string | null }> };
+    assert.equal(state.rules.length, 2);
+    assert.ok(state.occurrences.some(item => item.ruleId === observeRule.id && item.outcome === 'observed'));
+    assert.ok(state.occurrences.some(item => item.ruleId === activeRule.id && item.outcome === 'queued' && item.runId === ticket?.runId));
+    assert.ok(state.occurrences.some(item => item.ruleId === activeRule.id && item.outcome === 'skipped_busy'));
+  } finally {
+    if (ruleIds.length) await pool.execute(`DELETE FROM proactive_rules WHERE tenant_id = ? AND id IN (${ruleIds.map(() => '?').join(',')})`, [tenantId, ...ruleIds]);
+    if (runIds.length) await pool.execute(`DELETE FROM runs WHERE tenant_id = ? AND id IN (${runIds.map(() => '?').join(',')})`, [tenantId, ...runIds]);
+    if (threadIds.length) await pool.execute(`DELETE FROM threads WHERE tenant_id = ? AND id IN (${threadIds.map(() => '?').join(',')})`, [tenantId, ...threadIds]);
+    for (const value of [alphaCookie, betaCookie]) {
+      if (value) await fetch(`${origin}/api/auth/logout`, { method: 'POST', headers: { cookie: value, origin, 'content-type': 'application/json' }, body: '{}' });
     }
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

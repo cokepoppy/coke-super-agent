@@ -11,6 +11,7 @@ import { pool } from './db.ts';
 import { config } from './config.ts';
 import { runGuestPty, type GuestPtyStageEvent } from './runtime-bundle.ts';
 import { createQueuedReplyRun, createQueuedRun, getRunDetail, listEventsAfter, listRecentActivity, listRuns, runExists } from './task-store.ts';
+import { createProactiveRule, deleteProactiveRule, listProactiveRules, patchProactiveRule } from './proactive-store.ts';
 import { ComputerNotConfiguredError, ComputerNotReadyError, ComputerOperationError, ComputerRecoveryRequiredError, DesktopNotReadyError, connectTenantSandbox, getTenantBrowserState, getTenantComputer, retryTenantBrowser, startTenantComputer } from './computer.ts';
 import { proxyDesktopHttp, proxyDesktopUpgrade } from './desktop-proxy.ts';
 import { scheduleAgentRun } from './agent-runtime.ts';
@@ -108,6 +109,15 @@ function routeRunId(pathname: string, suffix = ''): string | null {
   if (!match) return null;
   try { return decodeURIComponent(match[1]); }
   catch { return null; }
+}
+
+function routeProactiveRuleId(pathname: string): string | null {
+  const match = pathname.match(/^\/api\/proactive\/rules\/([^/]+)$/);
+  if (!match) return null;
+  try {
+    const value = decodeURIComponent(match[1]);
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) ? value : null;
+  } catch { return null; }
 }
 
 function streamEvents(req: IncomingMessage, res: ServerResponse, session: SessionView, runId: string, after: number): void {
@@ -379,6 +389,42 @@ export function createHttpServer() {
         return;
       }
 
+      if (method === 'GET' && url.pathname === '/api/proactive/rules') {
+        json(res, 200, await listProactiveRules(session.tenant.id));
+        return;
+      }
+
+      if (method === 'POST' && url.pathname === '/api/proactive/rules') {
+        requireSameOrigin(req);
+        const body = await readJson(req);
+        const rule = await createProactiveRule(session.tenant.id, body);
+        writeHttpLog('proactive.rule.created', 'info', { requestId, tenantId, ruleId: rule.id, mode: rule.mode, intervalMinutes: rule.intervalMinutes });
+        json(res, 201, { rule });
+        return;
+      }
+
+      const proactiveRuleId = routeProactiveRuleId(url.pathname);
+      if (proactiveRuleId && method === 'PATCH') {
+        requireSameOrigin(req);
+        const body = await readJson(req);
+        const allowedKeys = new Set(['name', 'prompt', 'intervalMinutes', 'mode', 'enabled']);
+        if (Object.keys(body).some(key => !allowedKeys.has(key))) throw new HttpError(400, '主动规则包含不支持的字段');
+        const rule = await patchProactiveRule(session.tenant.id, proactiveRuleId, body);
+        if (!rule) throw new HttpError(404, '主动规则不存在');
+        writeHttpLog('proactive.rule.updated', 'info', { requestId, tenantId, ruleId: rule.id, enabled: rule.enabled, mode: rule.mode });
+        json(res, 200, { rule });
+        return;
+      }
+
+      if (proactiveRuleId && method === 'DELETE') {
+        requireSameOrigin(req);
+        const deleted = await deleteProactiveRule(session.tenant.id, proactiveRuleId);
+        if (!deleted) throw new HttpError(404, '主动规则不存在');
+        writeHttpLog('proactive.rule.deleted', 'info', { requestId, tenantId, ruleId: proactiveRuleId });
+        json(res, 200, { deleted: true });
+        return;
+      }
+
       if (method === 'POST' && url.pathname === '/api/tasks') {
         requireSameOrigin(req);
         const body = await readJson(req);
@@ -506,6 +552,8 @@ export function createHttpServer() {
       const initialMessage = error instanceof Error ? error.message : String(error);
       if (initialMessage.startsWith('Task must contain')) failureStatus = 400;
       else if (initialMessage.startsWith('Task cannot be continued')) failureStatus = 409;
+      else if (initialMessage.startsWith('主动规则仍有')) failureStatus = 409;
+      else if (/^(规则名称必须|规则任务必须|触发间隔必须|规则模式必须|enabled 必须)/.test(initialMessage)) failureStatus = 400;
       writeHttpLog('request.failed', failureStatus >= 500 ? 'error' : 'warning', {
         requestId,
         tenantId: tenantId || undefined,
@@ -522,6 +570,8 @@ export function createHttpServer() {
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith('Task must contain')) { json(res, 400, { error: '请输入 1 到 10000 个字符的任务内容' }); return; }
       if (message.startsWith('Task cannot be continued')) { json(res, 409, { error: '该任务仍在运行，或已无法继续。请刷新任务状态后重试。' }); return; }
+      if (message.startsWith('主动规则仍有')) { json(res, 409, { error: message }); return; }
+      if (/^(规则名称必须|规则任务必须|触发间隔必须|规则模式必须|enabled 必须)/.test(message)) { json(res, 400, { error: message }); return; }
       json(res, 500, { error: '服务暂时不可用' });
     }
   });

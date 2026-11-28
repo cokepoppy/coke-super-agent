@@ -38,7 +38,7 @@ export const config = {
   },
   docker: {
     executable: process.env.CSA_DOCKER_EXECUTABLE || 'docker',
-    desktopImage: process.env.CSA_DOCKER_DESKTOP_IMAGE || 'csa-super-agent-desktop:20261127.9',
+    desktopImage: process.env.CSA_DOCKER_DESKTOP_IMAGE || 'csa-super-agent-desktop:20261128.15',
     desktopCpus: process.env.CSA_DOCKER_DESKTOP_CPUS || '2',
     desktopMemory: process.env.CSA_DOCKER_DESKTOP_MEMORY || '3g',
     desktopShmSize: process.env.CSA_DOCKER_DESKTOP_SHM_SIZE || '1g',

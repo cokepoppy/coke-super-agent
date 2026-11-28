@@ -23,7 +23,7 @@
     "cube:desktop-template": "tsx scripts/cube/create-desktop-template.ts",
     "test": "tsx --test src/server/*.test.ts",
     "test:public-routing": "node --test tests/public-routing.test.mjs",
-    "test:dsh-runtime": "node --test scripts/cube/dsh-runtime/*.test.mjs"
+    "test:dsh-runtime": "node --test scripts/cube/dsh-runtime/*.test.mjs scripts/docker/dsh-runtime/*.test.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "0.8.0",

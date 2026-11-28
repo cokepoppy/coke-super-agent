@@ -80,7 +80,7 @@ if [[ "$runtime_version" != "0.2.2-rc.2" || ! "$wheel_sha256" =~ ^[a-f0-9]{64}$ 
 fi
 
 lock_hash="$(shasum -a 256 "$package_dir/package-lock.json" | cut -d' ' -f1)"
-runtime_key="$(cat "$package_dir/package-lock.json" <(printf '\0') "$package_dir/runtime-manifest.json" <(printf '\0') "$0" <(printf '\0') "$package_dir/run-task.mjs" <(printf '\0') "$package_dir/session-budget.mjs" <(printf '\0') "$package_dir/computer-plugin.mjs" <(printf '\0') "$package_dir/chrome-cdp-pipe-bridge.mjs" <(printf '\0') "$package_dir/dsh-runtime-launcher.mjs" <(printf '\0') "$repo_root/scripts/cube/bootstrap-dsh-runtime.sh" <(printf '\0') "$repo_root/scripts/cube/run-dsh-runtime-bootstrap.sh" | shasum -a 256 | cut -d' ' -f1)"
+runtime_key="$(cat "$package_dir/package-lock.json" <(printf '\0') "$package_dir/runtime-manifest.json" <(printf '\0') "$0" <(printf '\0') "$package_dir/run-task.mjs" <(printf '\0') "$package_dir/session-budget.mjs" <(printf '\0') "$package_dir/computer-plugin.mjs" <(printf '\0') "$repo_root/scripts/docker/dsh-runtime/superagent-ticket-plugin.mjs" <(printf '\0') "$package_dir/chrome-cdp-pipe-bridge.mjs" <(printf '\0') "$package_dir/dsh-runtime-launcher.mjs" <(printf '\0') "$repo_root/scripts/cube/bootstrap-dsh-runtime.sh" <(printf '\0') "$repo_root/scripts/cube/run-dsh-runtime-bootstrap.sh" | shasum -a 256 | cut -d' ' -f1)"
 mkdir -p "$cache_root"
 log_disk_space preflight "$cache_root"
 archive="$cache_root/dsh-runtime-linux-arm64-${runtime_key}.tar.gz"
@@ -154,13 +154,13 @@ log_stage runtime-wheel-ready sha256="$wheel_sha256" cache_hit="$wheel_cache_hit
 export HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy="$proxy"
 export npm_config_proxy="$proxy" npm_config_https_proxy="$proxy"
 export npm_config_os=linux npm_config_cpu=arm64 npm_config_libc=glibc
-export npm_config_fetch_retries=5 npm_config_fetch_timeout=900000 npm_config_maxsockets=3 npm_config_loglevel=http
+export npm_config_fetch_retries=10 npm_config_fetch_timeout=1200000 npm_config_maxsockets=1 npm_config_loglevel=http
 export npm_config_cache="${CSA_NPM_CACHE_DIR:-$cache_root/npm-cache}"
 export NO_PROXY= no_proxy=
 mkdir -p "$npm_config_cache"
 
 log_disk_space before-npm-ci "$cache_root"
-log_stage npm-ci-start os=linux cpu=arm64 cache="$npm_config_cache"
+log_stage npm-ci-start os=linux cpu=arm64 cache="$npm_config_cache" fetch_retries="$npm_config_fetch_retries" fetch_timeout_ms="$npm_config_fetch_timeout" max_sockets="$npm_config_maxsockets"
 echo "Installing the version-matched TypeScript SDK and Linux ARM64 Node runtime through the host HTTP proxy..." >&2
 npm ci --prefix "$runtime_dir" --no-audit --no-fund --loglevel=http \
   --ignore-scripts --force --os=linux --cpu=arm64 --libc=glibc >&2 &

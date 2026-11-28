@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ActivityFeedItem, BrowserState, ComputerState, ComputerView, RunDetail, RunEventView, RunSummary, SessionView, TaskArtifact } from '../shared/types.ts';
+import type { ProactiveMode, ProactiveOccurrenceView, ProactiveRuleView } from '../shared/proactive.ts';
 import { noVncWebSocketPath } from '../shared/no-vnc-path.ts';
 import './style.css';
 
-type View = 'chat' | 'activity' | 'computer';
+type View = 'chat' | 'activity' | 'computer' | 'proactive';
 
 function appPath(path: string): string {
   const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
@@ -116,6 +117,16 @@ function App() {
     setSelectedId(current => current && result.tasks.some(task => task.id === current) ? current : result.tasks[0]?.id || null);
   }
 
+  async function openTask(id: string) {
+    setView('chat');
+    try {
+      await loadTasks();
+      setSelectedId(id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '任务列表读取失败');
+    }
+  }
+
   useEffect(() => {
     let active = true;
     void api<{ session: SessionView }>('/api/auth/session').then(async result => {
@@ -204,6 +215,7 @@ function App() {
       <nav className="primary-nav" aria-label="主导航">
         <button className={view === 'chat' ? 'selected' : ''} onClick={() => setView('chat')}><span>◌</span>任务</button>
         <button className={view === 'activity' ? 'selected' : ''} onClick={() => setView('activity')}><span>◷</span>活动</button>
+        <button className={view === 'proactive' ? 'selected' : ''} onClick={() => setView('proactive')}><span>✳</span>主动规则</button>
         <button className={view === 'computer' ? 'selected' : ''} onClick={() => setView('computer')}><span>▣</span>云电脑</button>
       </nav>
       <div className="side-section-label recent-heading">最近任务 <span>{tasks.length}</span></div>
@@ -223,13 +235,13 @@ function App() {
     <main className="main-panel">
       <header className="topbar">
         <div className="mobile-brand"><RunGlyph /><span>Coke Super Agent</span></div>
-        <div className="topbar-title">{view === 'chat' ? (selected?.title || '你的个人 Agent') : view === 'activity' ? '活动' : '云电脑'}</div>
+        <div className="topbar-title">{view === 'chat' ? (selected?.title || '你的个人 Agent') : view === 'activity' ? '活动' : view === 'proactive' ? '主动规则' : '云电脑'}</div>
         <div className="topbar-right"><span className="tenant-chip"><i />{session.tenant.slug}</span><button className="topbar-avatar" aria-label={session.user.displayName}>{session.user.displayName.slice(0, 1).toUpperCase()}</button></div>
       </header>
 
       {error && <div className="global-error" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="关闭">×</button></div>}
 
-      {view === 'computer' ? <ComputerPanel tenant={session.tenant.displayName} /> : view === 'activity' ? <ActivityPanel tenantId={session.tenant.id} tasks={tasks} selected={selected} debugMode={debugMode} onToggleDebug={toggleDebugMode} onOpenTask={id => { setSelectedId(id); setView('chat'); }} /> : <section className="chat-view">
+      {view === 'computer' ? <ComputerPanel tenant={session.tenant.displayName} /> : view === 'activity' ? <ActivityPanel tenantId={session.tenant.id} tasks={tasks} selected={selected} debugMode={debugMode} onToggleDebug={toggleDebugMode} onOpenTask={id => void openTask(id)} /> : view === 'proactive' ? <ProactivePanel onOpenTask={id => void openTask(id)} /> : <section className="chat-view">
         <div className="chat-scroll">
           {!selected ? <div className="welcome-state">
             <div className="welcome-orbit"><RunGlyph /></div>
@@ -239,7 +251,7 @@ function App() {
             <div className="suggestions"><button onClick={() => setDraft('帮我研究一个主题，并整理成简明报告。')}>研究一个主题 <span>↗</span></button><button onClick={() => setDraft('打开云电脑，帮我整理一个工作文件。')}>使用云电脑 <span>↗</span></button><button onClick={() => setDraft('写一个 Python 脚本并运行，生成结果文件。')}>运行代码 <span>↗</span></button></div>
           </div> : <div className="conversation" aria-live="polite">
             <div className="message user-message"><div className="message-avatar">{session.user.displayName.slice(0, 1).toUpperCase()}</div><div className="message-copy"><div className="message-meta"><strong>{session.user.displayName}</strong><time>{timeLabel(selected.createdAt)}</time></div><p>{detail?.prompt || selected.prompt}</p></div></div>
-            <div className="run-status-card"><span className={'run-status-icon ' + selected.status}>{selected.status === 'queued' ? '◷' : selected.status === 'done' ? '✓' : '•'}</span><div className="run-status-copy"><strong>{statusLabel(selected.status)}</strong><p>{selected.status === 'queued' ? '任务已进入队列，Agent 将在你的 Linux microVM 中处理。' : selected.status === 'waiting_for_user' ? '请打开云电脑完成登录或验证码，然后在这里发送继续指令。' : selected.status === 'working' ? 'Agent 正在你的 Linux microVM 中处理任务。' : selected.status === 'failed' ? '运行失败；打开调试模式查看失败阶段和完整链路。' : '任务活动已保存。'}</p>{debugMode && <code className="run-correlation">Run ID · {selected.id}</code>}</div><DebugToggle enabled={debugMode} onToggle={toggleDebugMode} />
+            <div className="run-status-card"><span className={'run-status-icon ' + selected.status}>{selected.status === 'queued' ? '◷' : selected.status === 'done' ? '✓' : '•'}</span><div className="run-status-copy"><strong>{statusLabel(selected.status)}</strong><p>{selected.status === 'queued' ? '任务已进入队列，租户 Docker DSH Worker 将通过 Cube microVM 执行远程命令。' : selected.status === 'waiting_for_user' ? '请打开云电脑完成登录或验证码，然后在这里发送继续指令。' : selected.status === 'working' ? '租户 Docker DSH Worker 正在通过 Cube microVM 访问隔离工作区。' : selected.status === 'failed' ? '运行失败；打开调试模式查看失败阶段和完整链路。' : '任务活动已保存。'}</p>{debugMode && <code className="run-correlation">Run ID · {selected.id}</code>}</div><DebugToggle enabled={debugMode} onToggle={toggleDebugMode} />
             </div>
             {(() => {
               const events = detail?.events || [];
@@ -283,6 +295,122 @@ function App() {
       </section>}
     </main>
   </div>;
+}
+
+function proactiveOutcomeLabel(outcome: ProactiveOccurrenceView['outcome']): string {
+  return { observed: '已记录（观察模式）', queued: '已创建 Agent Ticket', skipped_busy: '跳过（上一条仍在运行）' }[outcome];
+}
+
+function ProactivePanel({ onOpenTask }: { onOpenTask: (id: string) => void }) {
+  const [rules, setRules] = useState<ProactiveRuleView[]>([]);
+  const [occurrences, setOccurrences] = useState<ProactiveOccurrenceView[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [busyRuleId, setBusyRuleId] = useState('');
+  const [deletingRuleId, setDeletingRuleId] = useState('');
+  const [name, setName] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [intervalMinutes, setIntervalMinutes] = useState(5);
+  const [mode, setMode] = useState<ProactiveMode>('observe');
+  const [error, setError] = useState('');
+
+  async function refresh() {
+    const result = await api<{ rules: ProactiveRuleView[]; occurrences: ProactiveOccurrenceView[] }>('/api/proactive/rules');
+    setRules(result.rules);
+    setOccurrences(result.occurrences);
+  }
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      try {
+        const result = await api<{ rules: ProactiveRuleView[]; occurrences: ProactiveOccurrenceView[] }>('/api/proactive/rules');
+        if (active) { setRules(result.rules); setOccurrences(result.occurrences); setError(''); }
+      } catch (reason) {
+        if (active) setError(reason instanceof Error ? reason.message : '主动规则读取失败');
+      } finally { if (active) setLoading(false); }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
+
+  async function createRule(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true); setError('');
+    try {
+      await api<{ rule: ProactiveRuleView }>('/api/proactive/rules', {
+        method: 'POST',
+        body: JSON.stringify({ name, prompt, intervalMinutes, mode }),
+      });
+      setName(''); setPrompt(''); setIntervalMinutes(5); setMode('observe');
+      await refresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '主动规则创建失败'); }
+    finally { setSaving(false); }
+  }
+
+  async function toggleRule(rule: ProactiveRuleView) {
+    setBusyRuleId(rule.id); setError('');
+    try {
+      await api<{ rule: ProactiveRuleView }>('/api/proactive/rules/' + encodeURIComponent(rule.id), {
+        method: 'PATCH', body: JSON.stringify({ enabled: !rule.enabled }),
+      });
+      await refresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '主动规则更新失败'); }
+    finally { setBusyRuleId(''); }
+  }
+
+  async function deleteRule(rule: ProactiveRuleView) {
+    if (deletingRuleId !== rule.id) { setDeletingRuleId(rule.id); return; }
+    setBusyRuleId(rule.id); setError('');
+    try {
+      await api('/api/proactive/rules/' + encodeURIComponent(rule.id), { method: 'DELETE', body: '{}' });
+      setDeletingRuleId('');
+      await refresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : '主动规则删除失败'); }
+    finally { setBusyRuleId(''); }
+  }
+
+  return <section className="content-page proactive-page">
+    <div className="content-heading">
+      <p className="eyebrow">DEEPSEEK SUPERAGENT</p>
+      <h1>主动 Agent</h1>
+      <p>把周期性 Trigger 变成独立 Ticket；每个 Ticket 经租户 Docker 中的 DSH Worker 执行，Bash 与工作区仍走该租户的 Cube microVM。</p>
+    </div>
+    {error && <p className="proactive-error" role="alert">{error}</p>}
+    <div className="proactive-layout">
+      <form className="proactive-create-card" onSubmit={event => void createRule(event)}>
+        <div><span className="proactive-step">01</span><h2>创建主动规则</h2></div>
+        <label>规则名称<input aria-label="规则名称" value={name} onChange={event => setName(event.target.value)} maxLength={120} required placeholder="例如：每小时查看交易规则更新" /></label>
+        <label>Agent 要完成的任务<textarea aria-label="Agent 要完成的任务" value={prompt} onChange={event => setPrompt(event.target.value)} maxLength={10000} required rows={5} placeholder="写清楚检查什么、范围是什么，以及需要返回什么结果。" /></label>
+        <div className="proactive-form-row">
+          <label>触发间隔（分钟）<input aria-label="触发间隔（分钟）" type="number" min={1} max={10080} step={1} value={intervalMinutes} onChange={event => setIntervalMinutes(Number(event.target.value))} required /></label>
+          <label>执行模式<select aria-label="执行模式" value={mode} onChange={event => setMode(event.target.value as ProactiveMode)}><option value="observe">Observe · 只记录</option><option value="active">Active · 启动 Agent</option></select></label>
+        </div>
+        <div className="proactive-mode-hint"><strong>{mode === 'observe' ? '观察模式' : '主动执行模式'}</strong><span>{mode === 'observe' ? '触发时写入记录，不调用模型或启动任务。' : '触发时创建独立 Ticket，并由现有 Docker DSH 队列执行。规则正文就是授权范围。'}</span></div>
+        <button className="primary-button proactive-submit" type="submit" disabled={saving || !name.trim() || !prompt.trim()}>{saving ? '正在保存…' : '创建规则'}</button>
+      </form>
+      <div className="proactive-list-column">
+        <section className="proactive-rules-card">
+          <header><div><span className="proactive-step">02</span><h2>你的规则</h2></div><span>{rules.length} 条</span></header>
+          {loading ? <p className="muted">正在读取主动规则…</p> : rules.length === 0 ? <p className="proactive-empty">还没有规则。新规则默认只记录触发；需要时再切换为主动执行。</p> : <div className="proactive-rule-list">{rules.map(rule => <article className="proactive-rule" key={rule.id}>
+            <div className="proactive-rule-top"><div><strong>{rule.name}</strong><small>{rule.enabled ? '运行中' : '已暂停'} · 每 {rule.intervalMinutes} 分钟 · {rule.mode === 'observe' ? 'Observe' : 'Active'}</small></div><span className={'proactive-mode-badge ' + rule.mode}>{rule.mode === 'observe' ? '观察' : '主动'}</span></div>
+            <p>{rule.prompt}</p>
+            <div className="proactive-rule-meta"><span>下次触发：{rule.enabled ? timeLabel(rule.nextRunAt) : '暂停中'}</span>{rule.lastTriggeredAt && <span>上次：{timeLabel(rule.lastTriggeredAt)} · {rule.lastOutcome ? proactiveOutcomeLabel(rule.lastOutcome) : ''}</span>}</div>
+            <div className="proactive-rule-actions"><button type="button" onClick={() => void toggleRule(rule)} disabled={busyRuleId === rule.id}>{busyRuleId === rule.id ? '处理中…' : rule.enabled ? '暂停' : '恢复'}</button><button className={deletingRuleId === rule.id ? 'confirm-delete' : ''} type="button" onClick={() => void deleteRule(rule)} disabled={busyRuleId === rule.id}>{deletingRuleId === rule.id ? '再点一次确认删除' : '删除'}</button></div>
+          </article>)}</div>}
+        </section>
+        <section className="proactive-history-card">
+          <header><div><span className="proactive-step">03</span><h2>Trigger / Ticket 历史</h2></div></header>
+          {occurrences.length === 0 ? <p className="proactive-empty">触发后会在这里显示观察记录、Ticket 和跳过原因。</p> : <div className="proactive-occurrence-list">{occurrences.map(item => <article className={'proactive-occurrence ' + item.outcome} key={item.id}>
+            <div><strong>{item.ruleName}</strong><small>{timeLabel(item.scheduledFor)} · {proactiveOutcomeLabel(item.outcome)}</small></div>
+            {item.runId && <button type="button" onClick={() => onOpenTask(item.runId!)}>打开 Agent 任务 →</button>}
+          </article>)}</div>}
+        </section>
+      </div>
+    </div>
+    <p className="proactive-footnote">调度记录与 Ticket 按租户隔离。正在执行或等待人工接管的规则不会重复排队；错过多个周期时只补记一次，并直接推进到下一个未来触发时间。</p>
+  </section>;
 }
 
 function ActivityPanel({ tenantId, tasks, selected, debugMode, onToggleDebug, onOpenTask }: { tenantId: string; tasks: RunSummary[]; selected: RunSummary | null; debugMode: boolean; onToggleDebug: () => void; onOpenTask: (id: string) => void }) {
@@ -448,8 +576,8 @@ function ComputerPanel({ tenant }: { tenant: string }) {
   }
 
   const labels: Record<ComputerState, string> = {
-    not_created: '云电脑尚未启动', creating: '正在启动 Linux microVM', running: 'Linux microVM 已运行',
-    paused: 'Linux microVM 已暂停', failed: '上次启动失败',
+    not_created: '租户远程执行 microVM 尚未启动', creating: '正在启动租户执行环境', running: '租户 Cube microVM 已运行',
+    paused: '租户 Cube microVM 已暂停', failed: '上次启动失败',
   };
   const desktopSocketPath = noVncWebSocketPath(appPath('/api/computer/desktop/websockify'));
   const desktopUrl = appPath('/novnc/vnc.html?autoconnect=true&resize=scale&path=' + encodeURIComponent(desktopSocketPath));
@@ -459,7 +587,7 @@ function ComputerPanel({ tenant }: { tenant: string }) {
   if (desktopReady) return <section className="computer-page desktop-ready">
     <div className="desktop-view">
       <header className="desktop-toolbar">
-        <div><span className="status-pulse running" />{tenant} 的 Linux 云电脑</div>
+        <div><span className="status-pulse running" />{tenant} 的 Linux 桌面（Docker）</div>
         <div>
           <span className={'desktop-browser-status ' + browserState} role={browserState === 'failed' ? 'alert' : 'status'} aria-live="polite">
             {{ unavailable: '浏览器状态不可用', starting: '浏览器启动中', ready: '浏览器可操作', failed: '浏览器控制不可用', unknown: '浏览器状态未知' }[browserState]}
@@ -475,7 +603,7 @@ function ComputerPanel({ tenant }: { tenant: string }) {
   </section>;
 
   const desktopStatus = computer?.state === 'running' ? {
-    pending: '桌面组件已预装，等待启动会话', installing: '正在启动 Linux 桌面会话', ready: 'Linux 桌面已就绪', failed: '桌面启动失败，可重试',
+    pending: '租户 Docker 桌面等待启动', installing: '正在启动租户 Docker 桌面', ready: '租户 Docker 桌面已就绪', failed: '桌面启动失败，可重试',
   }[computer.desktopState] : '';
   const canStart = !computer || computer.state !== 'running' || computer.desktopState === 'pending' || computer.desktopState === 'failed';
 
@@ -484,11 +612,11 @@ function ComputerPanel({ tenant }: { tenant: string }) {
       <div className="computer-illustration"><div className="computer-window"><i /><i /><i /><div className="window-line" /><div className="window-line short" /><span>›_</span></div><div className="computer-stand" /></div>
       <p className="eyebrow">PRIVATE LINUX WORKSPACE</p>
       <h1>{tenant} 的云电脑</h1>
-      <p>每个租户使用自己的持久 Linux microVM，包含 XFCE 桌面、Chromium、终端、Node.js 和 Python。浏览器与桌面操作直接在这台租户电脑中进行。</p>
+      <p>每个租户使用专属 Cube microVM 提供隔离的远程 Bash 与工作区。可视 Linux 桌面、Chrome、noVNC 和 DSH Harness 运行在该租户 Docker 环境；DSH 通过应用桥接调用 Cube，不在 microVM 内安装 Agent Runtime。</p>
       <div className={'computer-status' + (computerFailed ? ' failed' : '')} role={computerFailed ? 'alert' : 'status'} aria-live="polite"><span className={'status-pulse ' + (computerFailed ? 'failed' : computer?.state || 'not_created')} />{loading ? '正在读取云电脑状态' : desktopStatus || labels[computer?.state || 'not_created']}</div>
       {canStart && <button className="primary-button computer-action" onClick={() => void startComputer()} disabled={loading || starting || computer?.state === 'creating'}>{starting ? '正在准备 Linux 云电脑…' : computer?.state === 'paused' ? '恢复 Linux microVM' : computer?.state === 'running' && computer.desktopState === 'failed' ? '重试桌面启动' : computer?.state === 'running' ? '启动桌面会话' : computer?.state === 'creating' ? '正在准备…' : '启动 Linux 云电脑'}</button>}
       {error && <p className="form-error computer-error" role="alert">{error}</p>}
-      <p className="computer-footnote">桌面、Chrome、Node.js、Python 和 Agent Runtime 由模板预装。启动时会检查组件并运行桌面会话；你也可以在 Linux 终端中用 apt 安装其他软件。浏览器配置和文件会保留在这台租户电脑中。</p>
+      <p className="computer-footnote">Docker 镜像预装桌面、Chrome、noVNC、Node.js、Python 与 DSH Harness；Chrome 配置保存在租户桌面卷。Agent 的 Bash 命令经 computer_terminal 到 Cube microVM 执行，apt 与任务工作区也属于该租户 microVM。</p>
     </div>
   </section>;
 }

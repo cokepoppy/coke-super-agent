@@ -34,6 +34,7 @@ import { classifyGuestRunRecovery } from './guest-run-recovery.ts';
 import { TenantRunLeaseLostError, tryAcquireTenantRunLease, type TenantRunLease } from './tenant-run-lease.ts';
 import { claimAndStartDockerDsh, DockerDshRecoveryPendingError } from './docker-dsh-launch-intent.ts';
 import { waitForDockerDshStartupEvidence } from './docker-dsh-startup-recovery.ts';
+import { dispatchDueProactiveRules, getProactiveTicketContext } from './proactive-store.ts';
 
 interface PendingRun extends RowDataPacket {
   id: string;
@@ -55,6 +56,7 @@ interface GuestRunState {
 
 const activeTenants = new Set<string>();
 let scanner: NodeJS.Timeout | undefined;
+let proactiveScanner: NodeJS.Timeout | undefined;
 let stopped = true;
 
 const desktopBootstrapScript = resolve(process.cwd(), 'scripts/cube/bootstrap-dsh-runtime.sh');
@@ -78,16 +80,21 @@ const guestTerminalExitGraceMs = 35_000;
 
 export function startAgentRuntime(): void {
   stopped = false;
-  writeRuntimeLog('queue.scanner.start', 'info', { intervalMs: 2500 });
+  writeRuntimeLog('queue.scanner.start', 'info', { intervalMs: 2500, proactiveRules: 'enabled' });
   void scanPendingTenants();
+  void scanProactiveTriggers();
   scanner = setInterval(() => void scanPendingTenants(), 2500);
   scanner.unref();
+  proactiveScanner = setInterval(() => void scanProactiveTriggers(), 2500);
+  proactiveScanner.unref();
 }
 
 export function stopAgentRuntime(): void {
   stopped = true;
   if (scanner) clearInterval(scanner);
   scanner = undefined;
+  if (proactiveScanner) clearInterval(proactiveScanner);
+  proactiveScanner = undefined;
   writeRuntimeLog('queue.scanner.stop', 'info', { activeTenantCount: activeTenants.size });
 }
 
@@ -108,6 +115,25 @@ async function scanPendingTenants(): Promise<void> {
     for (const row of rows) scheduleAgentRun(String(row.tenant_id));
   } catch (error) {
     writeRateLimitedRuntimeError('queue.scan', 'queue.scan.failed', runtimeErrorDetails(error));
+  }
+}
+
+async function scanProactiveTriggers(): Promise<void> {
+  if (stopped) return;
+  const startedAt = Date.now();
+  try {
+    const dispatched = await dispatchDueProactiveRules(new Date());
+    const queuedTenants = new Set(dispatched.filter(item => item.runId).map(item => item.tenantId));
+    for (const tenantId of queuedTenants) scheduleAgentRun(tenantId);
+    if (dispatched.length) writeRuntimeLog('proactive.scan.complete', 'info', {
+      dispatchedCount: dispatched.length,
+      queuedCount: dispatched.filter(item => item.runId).length,
+      observedCount: dispatched.filter(item => item.outcome === 'observed').length,
+      skippedBusyCount: dispatched.filter(item => item.outcome === 'skipped_busy').length,
+      durationMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    writeRateLimitedRuntimeError('proactive.scan', 'proactive.scan.failed', runtimeErrorDetails(error));
   }
 }
 
@@ -559,6 +585,14 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
     claim: () => createTenantDockerDshLaunchIntent(run.tenant_id, run.id),
     isStopped: () => stopped,
     writeInput: async () => {
+      const proactive = await getProactiveTicketContext(run.tenant_id, run.id);
+      if (proactive) await trace(run, {
+        component: 'superagent-router',
+        stage: 'ticket.context.loaded',
+        level: 'info',
+        message: '已从租户规则加载独立 Ticket 的授权范围，并传给 Docker DSH Worker。',
+        details: { ticketId: proactive.ticketId, ruleId: proactive.ruleId, source: proactive.source, workerPlacement: 'tenant-docker-dsh', executionPlacement: 'tenant-cube-microvm' },
+      });
       await writeTenantDockerDshInput(run.tenant_id, run.id, {
         threadId: run.thread_id,
         prompt: run.prompt,
@@ -567,6 +601,7 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
         apiKey: config.agent.apiKey,
         terminalBridgeUrl,
         terminalBridgeToken,
+        ...(proactive ? { proactive } : {}),
       });
       await trace(run, { component: 'docker', stage: 'dsh.input.write.complete', level: 'info', message: '任务输入和一次性启动意图已写入租户 runtime 卷。', durationMs: Date.now() - inputStartedAt, details: { inputBytes: Buffer.byteLength(JSON.stringify({ runId: run.id, threadId: run.thread_id, prompt: run.prompt, baseUrl: model.baseUrl, model: model.model })), stateRoot: '/var/lib/csa-agent-runtime' } });
     },
