@@ -28,7 +28,12 @@ import json, os, pathlib, stat, sys, tempfile
 state = json.loads(pathlib.Path(sys.argv[1]).read_text())
 env_path = pathlib.Path(sys.argv[2])
 lines = env_path.read_text().splitlines()
-values = {"CSA_AGENT_RUNTIME": state["previousRuntime"], "CSA_CUBE_WORKSPACE_MODE": state["previousWorkspaceMode"]}
+values = {
+    "CSA_AGENT_RUNTIME": state["previousRuntime"],
+    "CSA_CUBE_WORKSPACE_MODE": state["previousWorkspaceMode"],
+    "CSA_DSH_PLACEMENT": state["previousPlacement"],
+    "CSA_DOCKER_DESKTOP_IMAGE": state["previousDesktopImage"],
+}
 updated = []
 seen = set()
 for line in lines:

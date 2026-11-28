@@ -9,7 +9,7 @@ import { config } from './config.ts';
 import { assertTokenEncryptionKey, decryptSandboxTrafficToken, encryptSandboxTrafficToken } from './token-crypto.ts';
 import { sanitizeRunTrace } from './task-store.ts';
 import { provisionTenantWorkspace, TenantWorkspaceConfigurationError } from './tenant-workspace.ts';
-import { desktopBootstrapTimeoutMs } from './runtime-timeouts.ts';
+import { ensureTenantDockerDesktop, probeTenantDockerDesktop, readTenantDockerBrowserState, retryTenantDockerBrowser } from './docker-desktop.ts';
 
 interface ComputerRow extends RowDataPacket {
   sandbox_id: string | null;
@@ -27,6 +27,7 @@ type ComputerOperation = { generation: number } & (
 );
 
 const desktopBootstrapByTenant = new Map<string, Promise<void>>();
+const desktopBootstrapTimeoutMs = 30 * 60_000;
 
 type TraceSink = (event: RunTraceEvent) => Promise<void>;
 type ComputerStartOptions = { purpose?: 'desktop' | 'task'; trace?: TraceSink; runId?: string };
@@ -90,6 +91,10 @@ function tenantTemplateId(): string {
   return config.cube.templateId || config.cube.dshTemplateSnapshotId;
 }
 
+function usesDockerDesktop(): boolean {
+  return config.agent.dshPlacement === 'docker' && config.agent.runtime === 'dsh';
+}
+
 export function cubeConfig(): Config {
   const templateId = tenantTemplateId();
   if (!config.cube.apiUrl || !templateId) {
@@ -123,7 +128,7 @@ export async function getTenantComputer(tenantId: string): Promise<ComputerView>
   return view(rows[0]);
 }
 
-async function reserveOperation(tenantId: string, connection: PoolConnection): Promise<ComputerOperation | null> {
+async function reserveOperation(tenantId: string, connection: PoolConnection, purpose: 'desktop' | 'task'): Promise<ComputerOperation | null> {
   await connection.beginTransaction();
   let committed = false;
   try {
@@ -143,7 +148,7 @@ async function reserveOperation(tenantId: string, connection: PoolConnection): P
     }
     if (current.create_pending && !current.sandbox_id) throw new ComputerRecoveryRequiredError(uncertainCreateMessage);
     if (current.state === 'running' && current.sandbox_id && current.cube_traffic_token_ciphertext) {
-      if (current.desktop_state === 'ready' || current.desktop_state === 'installing' || desktopBootstrapByTenant.has(tenantId)) {
+      if ((purpose === 'task' && !usesDockerDesktop()) || current.desktop_state === 'ready' || current.desktop_state === 'installing' || desktopBootstrapByTenant.has(tenantId)) {
         await connection.commit();
         committed = true;
         return null;
@@ -176,6 +181,12 @@ export async function startTenantComputer(tenantId: string, options: ComputerSta
   const { purpose = 'desktop', trace, runId } = options;
   const startedAt = Date.now();
   await emitTrace(trace, { component: 'computer', stage: 'start', level: 'info', message: '开始检查租户 microVM。', details: { purpose } }, tenantId, runId);
+  if (!['cube', 'docker'].includes(config.agent.dshPlacement)) {
+    throw new ComputerNotConfiguredError('CSA_DSH_PLACEMENT 只能设置为 cube 或 docker。');
+  }
+  if (config.agent.dshPlacement === 'docker' && config.agent.runtime !== 'dsh') {
+    throw new ComputerNotConfiguredError('Docker Agent Runtime placement 当前只支持 DeepSeek Harness。');
+  }
   let cube: Config;
   try {
     cube = cubeConfig();
@@ -208,7 +219,7 @@ export async function startTenantComputer(tenantId: string, options: ComputerSta
   }
   let operation: ComputerOperation | null;
   try {
-    operation = await reserveOperation(tenantId, connection);
+    operation = await reserveOperation(tenantId, connection, purpose);
     await emitTrace(trace, { component: 'database', stage: 'computer.operation.reserve.complete', level: 'info', message: 'MySQL 云电脑操作预约事务已完成。', durationMs: Date.now() - reserveStartedAt, details: { generation: operation?.generation ?? null, reserved: Boolean(operation) } }, tenantId, runId);
   } catch (error) {
     await emitTrace(trace, { component: 'database', stage: 'computer.operation.reserve.failed', level: 'error', message: 'MySQL 云电脑操作预约事务失败。', durationMs: Date.now() - reserveStartedAt, details: errorDetails(error) }, tenantId, runId);
@@ -218,7 +229,7 @@ export async function startTenantComputer(tenantId: string, options: ComputerSta
   }
   if (!operation) {
     const current = await getTenantComputer(tenantId);
-    if (current.state === 'running' && current.desktopState === 'ready') {
+    if (purpose === 'desktop' && current.state === 'running' && current.desktopState === 'ready') {
       const [rows] = await pool.execute<ComputerRow[]>(
         'SELECT sandbox_id, generation FROM computers WHERE tenant_id = ? AND state = \'running\' AND desktop_state = \'ready\' LIMIT 1',
         [tenantId],
@@ -407,6 +418,23 @@ async function assertExistingSandbox(tenantId: string, cube: Config): Promise<vo
 
 async function probeTenantDesktop(tenantId: string, sandboxId: string, generation: number, trace?: TraceSink, runId?: string): Promise<boolean> {
   const startedAt = Date.now();
+  if (usesDockerDesktop()) {
+    try {
+      const result = await probeTenantDockerDesktop(tenantId);
+      await emitTrace(trace, {
+        component: 'desktop',
+        stage: result.ready ? 'health.probe.complete' : 'health.probe.unhealthy',
+        level: result.ready ? 'info' : 'error',
+        message: result.ready ? 'Docker 桌面容器、Chrome CDP 与 noVNC WebSocket 已通过实时探测。' : 'Docker 桌面容器未通过实时健康探测。',
+        durationMs: Date.now() - startedAt,
+        details: { sandboxId, generation, ...result },
+      }, tenantId, runId);
+      return result.ready;
+    } catch (error) {
+      await emitTrace(trace, { component: 'desktop', stage: 'health.probe.failed', level: 'error', message: 'Docker 桌面实时探测失败。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
+      return false;
+    }
+  }
   let sandbox: Sandbox | undefined;
   await emitTrace(trace, { component: 'desktop', stage: 'health.probe.start', level: 'info', message: '通过访客机文件接口检查 X11 socket、桌面会话进程及 VNC/noVNC 监听端口。', details: { sandboxId, generation, timeoutMs: 15_000 } }, tenantId, runId);
   try {
@@ -602,6 +630,75 @@ async function runDesktopBootstrap(tenantId: string, sandboxId: string, generati
   }
 }
 
+async function runDockerDesktopBootstrap(tenantId: string, sandboxId: string, generation: number, trace?: TraceSink, runId?: string): Promise<void> {
+  let leaseConnection: PoolConnection | undefined;
+  let leaseAcquired = false;
+  const leaseName = `csa-desktop:${tenantId}`;
+  const startedAt = Date.now();
+  try {
+    await emitTrace(trace, { component: 'desktop', stage: 'docker.bootstrap.start', level: 'info', message: '启动或恢复该租户专属的 Docker 桌面与 DSH 容器。', details: { sandboxId, generation, image: config.docker.desktopImage, timeoutMs: 180_000 } }, tenantId, runId);
+    leaseConnection = await pool.getConnection();
+    const [leaseRows] = await leaseConnection.execute<RowDataPacket[]>('SELECT GET_LOCK(?, 0) AS acquired', [leaseName]);
+    if (Number(leaseRows[0]?.acquired) !== 1) {
+      await emitTrace(trace, { component: 'desktop', stage: 'docker.bootstrap.lease.busy', level: 'info', message: '另一应用进程正在启动该租户的 Docker 桌面容器。', details: { sandboxId, generation } }, tenantId, runId);
+      return;
+    }
+    leaseAcquired = true;
+    const [rows] = await pool.execute<ComputerRow[]>(
+      "SELECT sandbox_id, state, desktop_state, generation FROM computers WHERE tenant_id = ? AND state = 'running' LIMIT 1",
+      [tenantId],
+    );
+    if (!rows[0] || rows[0].sandbox_id !== sandboxId || Number(rows[0].generation) !== generation || rows[0].desktop_state !== 'installing') {
+      throw new DesktopBootstrapLeaseLostError('Tenant desktop generation changed before Docker container startup.');
+    }
+    const target = await ensureTenantDockerDesktop(tenantId);
+    if (target.imageUpdated) {
+      await emitTrace(trace, { component: 'desktop', stage: 'docker.container.image-updated', level: 'warning', message: '租户 Docker 桌面镜像已更新；原桌面与 Agent 持久卷保留，更新前确认没有运行中的 DSH 进程。', details: { sandboxId, generation, loopbackPort: target.port, image: config.docker.desktopImage } }, tenantId, runId);
+    }
+    await emitTrace(trace, { component: 'desktop', stage: 'docker.container.running', level: 'info', message: '租户 Docker 桌面容器已启动，正在检查可见桌面、Chrome CDP 与 noVNC。', details: { sandboxId, generation, loopbackPort: target.port } }, tenantId, runId);
+    const deadline = Date.now() + 180_000;
+    let lastHeartbeatAt = Date.now();
+    let lastProbe: Awaited<ReturnType<typeof probeTenantDockerDesktop>> | undefined;
+    while (Date.now() < deadline) {
+      await assertDesktopBootstrapLease(leaseConnection, leaseName);
+      lastProbe = await probeTenantDockerDesktop(tenantId);
+      if (lastProbe.ready) break;
+      if (Date.now() - lastHeartbeatAt >= 15_000) {
+        await emitTrace(trace, { component: 'desktop', stage: 'docker.health.wait', level: 'info', message: '等待 Docker 中的 XFCE、Chrome CDP 和 WebSocket 监听全部就绪。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, elapsedSeconds: Math.floor((Date.now() - startedAt) / 1000), ...lastProbe } }, tenantId, runId);
+        lastHeartbeatAt = Date.now();
+      }
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 2_000));
+    }
+    if (!lastProbe?.ready) throw new Error(`Docker desktop readiness timed out: ${JSON.stringify(lastProbe || {})}`);
+    await assertDesktopBootstrapLease(leaseConnection, leaseName);
+    const [updated] = await pool.execute(
+      "UPDATE computers SET desktop_state = 'ready', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND state = 'running' AND desktop_state = 'installing'",
+      [tenantId, sandboxId, generation],
+    );
+    if ((updated as { affectedRows: number }).affectedRows !== 1) throw new DesktopBootstrapLeaseLostError('Tenant desktop generation changed after Docker health verification.');
+    await emitTrace(trace, { component: 'desktop', stage: 'docker.bootstrap.ready', level: 'info', message: 'Docker XFCE 桌面和 Chrome 已就绪，可通过产品 noVNC 页面接管。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...lastProbe } }, tenantId, runId);
+  } catch (error) {
+    if (!(error instanceof DesktopBootstrapLeaseLostError)) {
+      await pool.execute(
+        "UPDATE computers SET desktop_state = 'failed', desktop_updated_at = UTC_TIMESTAMP(3) WHERE tenant_id = ? AND sandbox_id = ? AND generation = ? AND state = 'running' AND desktop_state = 'installing'",
+        [tenantId, sandboxId, generation],
+      ).catch(() => undefined);
+    }
+    await emitTrace(trace, { component: 'desktop', stage: error instanceof DesktopBootstrapLeaseLostError ? 'docker.bootstrap.lease.lost' : 'docker.bootstrap.failed', level: error instanceof DesktopBootstrapLeaseLostError ? 'warning' : 'error', message: error instanceof DesktopBootstrapLeaseLostError ? 'Docker 桌面 generation 已变化，当前 worker 停止更新状态。' : '租户 Docker 桌面启动失败。', durationMs: Date.now() - startedAt, details: { sandboxId, generation, ...errorDetails(error) } }, tenantId, runId);
+  } finally {
+    if (leaseConnection) {
+      if (!leaseAcquired) leaseConnection.release();
+      else {
+        try {
+          const [releaseRows] = await leaseConnection.execute<RowDataPacket[]>('SELECT RELEASE_LOCK(?) AS released', [leaseName]);
+          if (Number(releaseRows[0]?.released) === 1) leaseConnection.release();
+          else leaseConnection.destroy();
+        } catch { leaseConnection.destroy(); }
+      }
+    }
+  }
+}
+
 async function assertDesktopBootstrapLease(connection: PoolConnection | undefined, leaseName: string): Promise<void> {
   if (!connection) throw new DesktopBootstrapLeaseLostError('The desktop bootstrap does not hold its MySQL lease connection.');
   try {
@@ -615,7 +712,10 @@ async function assertDesktopBootstrapLease(connection: PoolConnection | undefine
 
 function scheduleDesktopBootstrap(tenantId: string, sandboxId: string, generation: number, trafficTokenCiphertext: string, trace?: TraceSink, runId?: string): void {
   if (desktopBootstrapByTenant.has(tenantId)) return;
-  const operation = runDesktopBootstrap(tenantId, sandboxId, generation, trafficTokenCiphertext, trace, runId);
+  const operation = (usesDockerDesktop()
+    ? runDockerDesktopBootstrap(tenantId, sandboxId, generation, trace, runId)
+    : runDesktopBootstrap(tenantId, sandboxId, generation, trafficTokenCiphertext, trace, runId))
+    .finally(() => desktopBootstrapByTenant.delete(tenantId));
   desktopBootstrapByTenant.set(tenantId, operation);
 }
 
@@ -908,6 +1008,7 @@ export async function getTenantBrowserState(tenantId: string): Promise<BrowserSt
     if (error instanceof ComputerNotReadyError) return 'unavailable';
     throw error;
   }
+  if (usesDockerDesktop()) return readTenantDockerBrowserState(tenantId);
   const sandbox = await connectSandboxWithCredential(credential);
   try {
     return await readTenantBrowserState(sandbox);
@@ -918,6 +1019,7 @@ export async function getTenantBrowserState(tenantId: string): Promise<BrowserSt
 
 export async function retryTenantBrowser(tenantId: string): Promise<boolean> {
   const credential = await getTenantDesktopCredential(tenantId);
+  if (usesDockerDesktop()) return retryTenantDockerBrowser(tenantId);
   const sandbox = await connectSandboxWithCredential(credential);
   try {
     if (await readTenantBrowserState(sandbox) !== 'failed') return false;

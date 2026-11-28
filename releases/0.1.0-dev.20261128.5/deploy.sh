@@ -22,6 +22,14 @@ if [ ! -r "$env_file" ] || [ ! -x "$node_bin" ] || [ ! -x "$lima_bin" ]; then
   echo "Required application or Cube node configuration is missing." >&2
   exit 1
 fi
+desktop_image="csa-super-agent-desktop:20261128.10"
+expected_runtime_key="993ab6f3b625cc1775cd07ef68b1efa5877fbe11de4c4c941af4f9e8387f85b0"
+desktop_image_platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$desktop_image")"
+desktop_runtime_key="$(docker image inspect --format '{{index .Config.Labels "com.coke-super-agent.dsh-runtime-key"}}' "$desktop_image")"
+if [ "$desktop_image_platform" != "linux/arm64" ] || [ "$desktop_runtime_key" != "$expected_runtime_key" ]; then
+  echo "The Docker DSH image is missing, has the wrong architecture, or does not match this release." >&2
+  exit 1
+fi
 if [ -n "$(git -C "$repo_root" status --porcelain)" ]; then
   echo "Commit all source, release scripts, and plist changes before deploying." >&2
   exit 1
@@ -110,7 +118,7 @@ import json, os, pathlib, plistlib, sys
 env_path, state_path, baseline, installed_plist = map(pathlib.Path, sys.argv[1:])
 lines = env_path.read_text().splitlines()
 values = {}
-for key in ("CSA_AGENT_RUNTIME", "CSA_CUBE_WORKSPACE_MODE"):
+for key in ("CSA_AGENT_RUNTIME", "CSA_CUBE_WORKSPACE_MODE", "CSA_DSH_PLACEMENT", "CSA_DOCKER_DESKTOP_IMAGE"):
     matches = [line.split("=", 1)[1] for line in lines if line.startswith(key + "=")]
     values[key] = matches[-1] if matches else ""
 previous = baseline.resolve()
@@ -127,6 +135,8 @@ state = {
     "release": state_path.parent.name,
     "previousRuntime": values["CSA_AGENT_RUNTIME"],
     "previousWorkspaceMode": values["CSA_CUBE_WORKSPACE_MODE"],
+    "previousPlacement": values["CSA_DSH_PLACEMENT"],
+    "previousDesktopImage": values["CSA_DOCKER_DESKTOP_IMAGE"],
     "previousTarget": str(previous),
     "commit": os.environ["CSA_RELEASE_COMMIT"],
 }
@@ -138,18 +148,24 @@ python3 - "$env_file" <<'PY'
 import os, pathlib, stat, sys, tempfile
 path = pathlib.Path(sys.argv[1])
 lines = path.read_text().splitlines()
+desired = {
+    "CSA_AGENT_RUNTIME": "dsh",
+    "CSA_CUBE_WORKSPACE_MODE": "lima",
+    "CSA_DSH_PLACEMENT": "docker",
+    "CSA_DOCKER_DESKTOP_IMAGE": "csa-super-agent-desktop:20261128.10",
+}
 updated = []
 seen = set()
 for line in lines:
     key = line.split("=", 1)[0] if "=" in line else ""
-    if key == "CSA_AGENT_RUNTIME":
-        updated.append("CSA_AGENT_RUNTIME=dsh"); seen.add(key)
-    elif key == "CSA_CUBE_WORKSPACE_MODE":
-        updated.append("CSA_CUBE_WORKSPACE_MODE=lima"); seen.add(key)
+    if key in desired:
+        updated.append(key + "=" + desired[key])
+        seen.add(key)
     else:
         updated.append(line)
-if "CSA_AGENT_RUNTIME" not in seen: updated.append("CSA_AGENT_RUNTIME=dsh")
-if "CSA_CUBE_WORKSPACE_MODE" not in seen: updated.append("CSA_CUBE_WORKSPACE_MODE=lima")
+for key, value in desired.items():
+    if key not in seen:
+        updated.append(key + "=" + value)
 fd, tmp = tempfile.mkstemp(prefix=".release-env.", dir=str(path.parent))
 try:
     os.fchmod(fd, stat.S_IMODE(path.stat().st_mode))

@@ -4,15 +4,17 @@
 
 ## 首版决策
 
-**一个 TypeScript 应用、一套业务 MySQL、一个 CubeSandbox 节点，每个个人租户一台 Linux microVM。** 同一台租户 VM 内运行 DeepSeek Harness、桌面、浏览器和终端。用户从 Coke Dots 风格的任务页发起工作、看进度、打开电脑和接管，刷新后可以重开任务及其结果。前端构建为静态文件，由 TypeScript 服务同源提供。
+**一个 TypeScript 应用、一套业务 MySQL、一个 CubeSandbox 节点；每个个人租户有一个 Docker Agent/桌面容器和一台 Cube microVM。** Docker 容器内运行 DeepSeek Harness、XFCE、原生 Chrome、noVNC 与 Browser/Computer 工具；Cube microVM 承担 Bash、apt、Python、Node 和持久任务工作区。DSH 禁用本地 Bash 与文件工具，通过绑定租户和任务的内部桥接 API 调用对应 Cube microVM。用户从 Coke Dots 风格的任务页发起工作、看进度、打开同一桌面并在登录或验证码时接管，刷新后可以重开任务及结果。前端构建为静态文件，由 TypeScript 服务同源提供。
 
-**Mac M5 已跑通开发用的本地 Cube 数据面，真实 Chrome/CDP 和完整桌面交互仍未验收。** Lima ARM64 Linux 内的 CubeSandbox v0.8.0 已启动真实 KVM microVM，官方 SDK 命令、文件和暂停恢复通过。已安装本地 60 秒 `VsockServerReady` shim 补丁；基于新预装镜像构建的 Cube 模板 READY，同一模板内 Pi 与 DSH 的 DeepSeek 文本任务也通过。经过应用认证 WebSocket 的 RFB 首帧和键鼠输入已在浏览器故障注入场景验证。2026-11-27 已验证 Cube 节点停止、启动后工作区 bind mount 自动恢复；两台原运行 VM 恢复运行、一台原暂停 VM 仍暂停，且私网节点 SSH 不可达、公网模型 API 可达。这证明节点与挂载恢复，不证明 Agent 任务、Chrome 配置或浏览器登录态的应用层恢复。产品网页可视验收、真实 Chrome/CDP、Browser/Computer Use、租户盘加密仍待验收，因此本地节点仍是开发环境，不存放真实租户数据。CubeSandbox 上游 PR [#2345](https://github.com/TencentCloud/CubeSandbox/pull/2345) 的创建/模板 readiness 修正不能解释本项目 Chrome 卡顿，本地继续使用已验证的 60 秒补丁。最新容量检查：110 GiB 专用 APFS 卷余约 13 GiB；专用卷未加密。 [实测记录](cube-preflight.md#2026-11-19-m5-本地单节点实测) · [nested-virt 排障](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/troubleshooting/templates.md) · [ARM64/PVM 要求](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/quickstart.md)
+**2026-11-27 架构切换与当前验收。** 旧版把桌面、Chrome 和 DSH 放进 Cube microVM；Chrome/CDP 在本机嵌套 KVM guest 中长期卡住，因此当前实现把 DSH 与桌面迁到每租户 Docker 容器，Cube microVM 只提供隔离 Bash 和工作区。Alpha、Beta 均运行 ARM64 镜像 `csa-super-agent-desktop:20261127.9`，各自使用独立的桌面与 runtime 命名卷；两台容器的桌面、Chrome CDP、noVNC 探针均 ready。真实 DSH→Cube Bash 写入/回读和 DSH Browser/Computer 工具已通过。Alpha 公网桌面通过现有 VPS 隧道完成了真实 noVNC 画面、键盘输入及 Chrome 打开 `https://example.com` 的可视验收；Beta 账户访问 Alpha 任务和 artifacts 均为 404，Beta microVM 也读不到 Alpha 任务工作区的测试标记。noVNC 双斜杠路径和缺少 browser-status 文件的修正已验证。API 进程重启后，公网应用、任务记录和 noVNC 桌面恢复。Alpha `.9` 容器重启后，通过页面“重新连接”恢复 noVNC；Chrome 显示会话恢复提示，点击恢复后重新显示 `example.com`。这是保存在桌面卷的浏览器会话恢复，重启后需要一次 Chrome 恢复点击。公网测试沿用现有 VPS 转发配置，没有改 Nginx 或隧道服务。Chrome 在容器内使用 `--no-sandbox` 以绕过默认 seccomp 对 user namespace 的限制；这是明确的隔离减弱，仍需持续评估。Cube 专用 APFS 卷未加密，当前约余 12 GiB，因此此 Mac 节点只作开发验证，不保留真实租户数据或登录态。见[Docker 与 Cube 远程执行方案](dsh-docker-cube-remote-execution-study.md)和[Docker DSH 实测记录](template-build-incident-2026-11-21.md#2026-11-27-docker-image-9-public-novnc-and-api-recovery)。
 
-**2026-11-27 公网 DSH 任务和活动任务恢复验收通过。** 发布 `0.1.0-dev.20261127.2` 后，Alpha 通过公网应用提交真实 `deepseek-flash` 任务，Bash 写入文件、Alpha 下载内容完全匹配，Beta 对任务和文件均收到 404。发布 `.3` 后又在 Bash 正在执行时重启 API LaunchAgent；服务恢复后同一任务只重连一次 guest PTY、Harness 只启动一次，任务完成，Alpha 下载到的文件内容完全匹配，Beta 文件列表仍为 404。该任务从创建到 Bash 启动耗时 644 秒，总计 837 秒。旧 microVM 还需传输并安装 143.8 MB runtime。两次结果证明公网任务、产物、应用进程恢复、活动 DSH 任务续跑和租户 API 隔离，不证明新租户模板的预装状态。两台 demo VM 当前仍是 `running/failed`；Alpha 的 retained guest log 显示 Chrome 进程存活但 360 秒内没有监听本机 CDP 端口，底层原因仍未知。公网页面 HTTP 检查通过，但本轮 CUA 获取浏览器状态和选择公网浏览器均在 30 秒超时，网页点击式 UI 验收、桌面接管、Chrome/CDP、Browser/Computer Use 仍未通过。详细记录见[构建与运行故障记录](template-build-incident-2026-11-21.md#2026-11-27-release-010-dev202611273-active-dsh-recovery)和外部验收日志 `~/.local/share/csa-cube-node/build-logs/active-dsh-recovery-2026-11-27.jsonl`。
+**2026-11-27 旧版 Cube 内 DSH 路径的公网任务和活动任务恢复验收通过。** 发布 `0.1.0-dev.20261127.2` 后，Alpha 通过公网应用提交真实 `deepseek-flash` 任务，Bash 写入文件、Alpha 下载内容完全匹配，Beta 对任务和文件均收到 404。发布 `.3` 后又在 Bash 正在执行时重启 API LaunchAgent；服务恢复后同一任务只重连一次 guest PTY、Harness 只启动一次，任务完成，Alpha 下载到的文件内容完全匹配，Beta 文件列表仍为 404。该任务从创建到 Bash 启动耗时 644 秒，总计 837 秒。旧 microVM 还需传输并安装 143.8 MB runtime。该记录证明旧运行路径的任务恢复与租户 API 隔离，不是当前 Docker DSH 路径的重启验收。详细记录见[构建与运行故障记录](template-build-incident-2026-11-21.md#2026-11-27-release-010-dev202611273-active-dsh-recovery)和外部验收日志 `~/.local/share/csa-cube-node/build-logs/active-dsh-recovery-2026-11-27.jsonl`。
 
 **Browser Use、Computer Use 和租户内终端默认可用。** 常规导航、点击、输入、运行命令和安装系统包直接执行。站点要求登录、验证码或同类身份验证时，Agent 暂停并提示用户接管同一台电脑。账号、任务、文件、浏览器配置和桌面连接始终归属租户。
 
 Pi 与 DSH runtime 共用同一套电脑工具和操作规则；Pi 的任务提示也明确规定日常操作无需逐步批准，只在真实登录或验证码时交接。此规则不解除租户间隔离或认证。
+
+**当前 Docker DSH 活动任务的 API 重启恢复已实测。** Alpha 的真实 `deepseek-flash` 任务在 Harness `session.run()` 执行期间重启 TypeScript API。恢复后的进程通过持久状态中的 PID 与 run ID 接回原 Harness；`docker.harness.launch.start` 只记录一次，任务随后完成，Alpha 通过产品 artifacts API 从 Cube microVM 下载到精确的 36 字节测试文件。恢复器现在按 MySQL 中已提交的 guest trace 序号继续时间线，避免重放已有事件。没有重启 Docker 或 Cube VM。恢复细节和证据见[Docker DSH 实测记录](template-build-incident-2026-11-21.md#2026-11-27-docker-image-9-public-novnc-and-api-recovery)。
 
 ## 调研结论
 
@@ -25,7 +27,7 @@ DeepSeek Harness 团队原文把工作拆为负责交互和派发的 Router、�
 | DeepSeek 设计 | Coke 首版实现 |
 | --- | --- |
 | Router | Node 进程内的 TypeScript 模块，接住用户请求、登记任务、推送进度、把显式跟进路由到对应任务。基于任务 ID 和用户动作判断归属。 |
-| Worker | DSH 是首版主验收 runtime，由 VM 内一个 TypeScript 服务启动；`CSA_AGENT_RUNTIME=pi` 可选启用 Pi，作为 Coke Dots/Grok Bot 既有 Pi runtime 的对照。两者都在同一租户 microVM 内运行，并复用任务目录、云电脑工具和持久化状态。每个租户首版同时跑一条任务，共享一套真实鼠标键盘与浏览器。不同租户可并行。 |
+| Worker | DSH 是主验收 runtime，由每租户 Docker 容器内的 TypeScript 服务启动；桌面与 Chrome 在同一容器，由独立 UID 运行。DSH 的默认本地 Bash、文件和工作目录工具关闭，命令通过短期租户/任务 token 转给应用，再由 Cube SDK 在绑定的 microVM 执行。每个租户同时跑一条任务，共享自己的桌面；不同租户可并行。 |
 | 异步交互、事件路由 | 提交立即拿到任务 ID，页面订阅已持久化的进度。首版输入是用户请求及其跟进、停止和接管事件。工作链路跑通后可增加用户明确配置的定时触发。 |
 | 存算分离、Watchdog | MySQL 保留产品状态，租户盘保留真实环境。应用进程内的定时检查对账正在创建的 VM、失联的任务、未回写的结果。根据记录恢复，外部结果不明时记为待核实。 |
 
@@ -51,7 +53,25 @@ flowchart TB
             SQL[(MySQL)]
             App --> SQL
         end
-        subgraph Linux["Lima ARM64 Linux · CubeSandbox 单节点"]
+        subgraph Docker["Docker Desktop · 每租户 Agent 与桌面"]
+            subgraph TenantA["租户 A"]
+                DSHA["DSH · UID 1001"]
+                DesktopA["XFCE + Chrome + noVNC · UID 1000"]
+                VolA[("桌面 profile 与 runtime 命名卷")]
+                DSHA --> DesktopA
+                DSHA --- VolA
+                DesktopA --- VolA
+            end
+            subgraph TenantB["租户 B"]
+                DSHB["DSH · UID 1001"]
+                DesktopB["XFCE + Chrome + noVNC · UID 1000"]
+                VolB[("桌面 profile 与 runtime 命名卷")]
+                DSHB --> DesktopB
+                DSHB --- VolB
+                DesktopB --- VolB
+            end
+        end
+    subgraph Linux["Lima ARM64 Linux · CubeSandbox 单节点"]
             subgraph Control["CubeSandbox 控制面"]
                 Cube["CubeAPI → CubeMaster"]
                 Template[CubeTemplateCenter]
@@ -68,8 +88,8 @@ flowchart TB
                 Disk["XFS · 模板和租户盘"]
                 Compute --> Disk
             end
-            A["租户 A microVM<br/>DSH + XFCE + Chrome + 终端"]
-            B["租户 B microVM<br/>DSH + XFCE + Chrome + 终端"]
+            A["租户 A microVM<br/>Bash + apt + Node + Python<br/>持久工作区"]
+            B["租户 B microVM<br/>Bash + apt + Node + Python<br/>持久工作区"]
             Cube --> Compute
             Compute -->|KVM| A
             Compute -->|KVM| B
@@ -79,34 +99,42 @@ flowchart TB
     end
     User -->|HTTPS / SSE / WebSocket| VPS
     VPS -->|反向 SSH 隧道| App
-    App -->|私有 REST| Cube
-    App <-->|任务事件 / 桌面流| Proxy
-    App -->|模型转发| Model[DeepSeek API]
+    App -->|任务与桌面代理| Docker
+    App -->|Cube SDK · 租户 sandbox ID| Cube
+    DSHA -->|短期 token 的 remote terminal| App
+    DSHB -->|短期 token 的 remote terminal| App
+    App -->|Cube SDK Bash| A
+    App -->|Cube SDK Bash| B
+    User <-->|noVNC RFB WebSocket| App
+    DSHA -->|模型请求| Model[DeepSeek API]
+    DSHB -->|模型请求| Model
 ```
 
-这里有两个逻辑控制面：Mac 上的 Coke TypeScript 服务管理用户、任务和租户到 VM 的归属；同一个 Lima Linux 节点内的 CubeAPI、CubeMaster、CubeTemplateCenter 管理 sandbox 生命周期和模板。节点内的 MySQL/Redis 由 Docker Compose 启动并由 systemd 管理。Cubelet、containerd Shim、CubeShim、CubeHypervisor 与 KVM 构成创建 microVM 的计算路径。两者不需要拆成多台机器或 Coke 微服务；验证外部库兼容性后，再决定是否共用 Mac 上已有的 MySQL 服务。
+Mac 上的 Coke TypeScript 服务是产品控制面，管理用户、任务、Docker 租户容器和租户到 Cube sandbox 的绑定；同一 Lima Linux 节点内的 CubeAPI、CubeMaster、CubeTemplateCenter 是 Cube 自己的 sandbox 控制面。Docker 租户容器只承载 DSH 与交互式桌面，不挂宿主目录或 Docker Socket；Cube microVM 执行终端命令并保存租户工作区。Cubelet、containerd Shim、CubeShim、CubeHypervisor 与 KVM 构成创建 microVM 的计算路径。架构仍是一套 Coke 应用和一个 Cube 节点，不拆成 Coke 微服务。
 
-1. **Mac 路径。** `infra/lima/cube-node.yaml` 在独立限容卷创建 ARM64 Linux 节点，`vmType: vz`、`nestedVirtualization: true`，无宿主目录挂载。客体 `/dev/kvm` 与真实 microVM 已通过。v0.8.0 的 10 秒 guest-agent 等待由本地 60 秒 shim 补丁处理；官方基础模板和桌面镜像模板均 READY。Cube 上游 PR [#2345](https://github.com/TencentCloud/CubeSandbox/pull/2345) 仍未合并，项目保留已安装并实测的 60 秒补丁。桌面镜像内 Pi 与 DSH 的 DeepSeek 文本任务成功；Chrome/CDP 尚未通过，也未进入 DSH 桌面任务。2026-11-26 修复了桥接器超时上限冲突和 guest 日志读取无截止时间两处诊断缺陷。校正后的 no-ptrace clone 中，39 字节 `Browser.getVersion` 命令已写入 pipe、回调在 935 ms 完成，Chrome FD 3/4 继承正确；但 300000 ms 命令期限内无 pipe 回包。9222 在等待中返回 `503 Chrome is starting`，Chrome 进程仍运行并增加 CPU ticks。旧版 420 秒配置生成 390000 ms 命令期限，超过 bridge 原有 360000 ms 上限，故那轮没有启动 Chrome；校验现已对齐。当前证据将故障限定在 Cube guest 内 Chrome 初始化/CDP 响应路径，原因尚未确定；嵌套虚拟化仍是嫌疑项。完整 Chrome/noVNC 桌面尚未通过。Cube 官方 PVM host kernel 仅 x86_64；原生 Apple backend issue [#975](https://github.com/TencentCloud/CubeSandbox/issues/975) 已关闭为 not planned。 [本地实测](cube-preflight.md#2026-11-19-m5-本地单节点实测) · [Chrome 事故记录](template-build-incident-2026-11-21.md#2026-11-26-chrome-timeout-contract-and-300-second-pipe-sample)
+1. **Mac 路径（Cube 单机与早期 microVM 桌面试验）。** `infra/lima/cube-node.yaml` 在独立限容卷创建 ARM64 Linux 节点，`vmType: vz`、`nestedVirtualization: true`，无宿主目录挂载。客体 `/dev/kvm` 与真实 microVM 已通过。v0.8.0 的 10 秒 guest-agent 等待由本地 60 秒 shim 补丁处理；Cube 上游 PR [#2345](https://github.com/TencentCloud/CubeSandbox/pull/2345) 仍未合并，项目保留已安装并实测的 60 秒补丁。早期将桌面镜像转成 Cube 模板时，Pi 与 DSH 的 DeepSeek 文本任务成功，但 Chrome/CDP 在 guest 内长期无响应；这条微 VM 桌面路径已由 Docker 桌面容器方案取代。底层 Cube microVM 仍是隔离 Bash 与持久工作区的数据面。Cube 官方 PVM host kernel 仅 x86_64；原生 Apple backend issue [#975](https://github.com/TencentCloud/CubeSandbox/issues/975) 已关闭为 not planned。 [本地实测](cube-preflight.md#2026-11-19-m5-本地单节点实测) · [Chrome 事故记录](template-build-incident-2026-11-21.md#2026-11-26-chrome-timeout-contract-and-300-second-pipe-sample)
 2. **容量与备选。** 上游单机要求至少 8 GB RAM。本机总内存 16 GB，目前 Docker Linux 客体报告约 7.75 GiB 总内存。先跑一台轻量桌面，再实测两台同时工作时的可用内存、swap 和首帧延迟。租户初始规格以 2 vCPU、2 GiB RAM 为测试起点。若嵌套 KVM 无法完成 Cube 实例启动或并发资源不足，改用一台带可用 KVM 的独立 Linux 节点，应用通过私有链路调用相同的接口。x86_64 节点要用对应架构的内核与桌面模板。
 3. **统一接入。** 一个 `CubeSandboxClient` 按固定版本 `openapi.yml` 封装创建、查询、连接、暂停和快照。应用只接受自身的电脑 ID，从 MySQL 解析对应的沙箱和版本。管理 API 与 CubeProxy 仅在私有网络监听或转发，方便外层 Linux 在本机与独立节点间替换。 [Cube API 契约](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/openapi.yml)
 4. **公网入口。** 沿用已有 VPS 的 Nginx 和由 Mac 发起的 SSH 反向隧道。公网前缀为 `/super-agent/`；VPS 只将该前缀代理到 VPS 回环端口 `14331`，再由隧道送到 Mac Vite Preview `127.0.0.1:5174`。服务端统一处理登录、任务事件 SSE 和 noVNC WebSocket。2026-11-26 已在 VPS 实际加载的 TLS 站点配置中启用该 location，并由 Mac LaunchAgent 持久运行 API、Preview 与隧道；公网页面、资源、健康检查、匿名拒绝、Alice 登录/登出、认证后的 noVNC HTML 及 Secure Cookie 均已通过 HTTP 验收。入口 JSON access log 记录 Nginx request ID、URI（不含 query）、上游地址、状态和耗时；request ID 传到 API 后也用于应用错误日志并回传给客户端。此项只证明公网传输和认证，不代表已完成登录后视觉、noVNC 首帧/键鼠或 Agent 任务验收。CubeAPI、CubeProxy 和 MySQL 仍只经 Mac 应用侧私有连接。 [既有 Grok Bot 的 Nginx 配置](https://github.com/cokepoppy/coke-grok-bot/blob/f917138bbdc8821ec9045e6730d2d6abdd5253b8/deploy/vps/grok-bot.locations.conf)
 
 ## 云电脑与复用清单
 
-CubeSandbox 自带 Ubuntu 22.04 图形桌面示例，使用 noVNC 并保留 `envd` 启动入口。该方案现在改为构建时预装：`images/coke-super-agent-desktop/Dockerfile` 基于 `cubesandbox-base:2026.16`，包含 XFCE、ARM64 Google Chrome、Node.js/npm、Python 3/venv 和 DSH/Pi runtime；Cube 从 registry 镜像生成模板。开发镜像分发走 Mac 回环私有 Registry：只绑定 `127.0.0.1:15001`，Cube 节点通过 Lima SSH 反向转发访问 `127.0.0.1:15002`，无需公开 GHCR 或新增服务。Docker build 需要 Mac HTTP 代理和仓库外 runtime bundle 缓存，镜像 build context 会在完成后删除。模板使用 `49983 /health` 检查 envd，租户 VM 建好后再由 TypeScript 控制面启动 XFCE、Chrome、VNC/noVNC bridge，并以 CDP 与 X11 检查桌面 ready。新镜像标记路径禁用 guest apt bootstrap；租户仍可在 Linux 终端主动使用 apt 安装额外软件。2026-11-24 本机 ARM64 镜像已构建并推入本地 Registry，digest `sha256:53d2c18f639182ee60487e0a7baa9ef8c4db253d6b11af8b72d37f311ae68179`，大小 776,863,558 bytes；禁网 Docker 容器完整 bootstrap 约 5 秒通过。Cube 模板 `tpl-827a52ee603c40f3992e40dd` READY，但从模板启动的真实 microVM 中 Chrome 未开放 CDP；GUI 和 headless 启动均未成功，根因仍待定位。 [CubeSandbox 桌面示例](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/README.md) · [CubeSandbox Dockerfile](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/Dockerfile) · [CubeSandbox 自定义镜像指南](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/tutorials/bring-your-own-image.md)
+**当前运行方案：** 每租户 Docker 容器从 `images/coke-super-agent-desktop/Dockerfile` 构建的预装桌面基础镜像派生；最终 `csa-super-agent-desktop` 镜像把锁定的 DSH runtime、Browser/Computer 插件和 remote-terminal 插件预装进去。桌面 UID 1000，DSH UID 1001，runtime 状态与浏览器 profile 放在租户专属命名卷。Cube microVM 不再启动 XFCE、Chrome 或 DSH；TS 控制面只在对应 sandbox 中执行远程 Bash，并通过 Cube Workspace API 管理文件。 [Docker 镜像构建](../scripts/docker/build-csa-docker-desktop-image.sh) · [Docker 租户生命周期](../src/server/docker-desktop.ts)
+
+**历史 Cube 内桌面镜像试验（不是当前产品运行方案）：** CubeSandbox 自带 Ubuntu 22.04 图形桌面示例，使用 noVNC 并保留 `envd` 启动入口。本项目曾基于 `cubesandbox-base:2026.16` 将 XFCE、ARM64 Google Chrome、Node.js/npm、Python 3/venv 和 DSH/Pi runtime 预装到 Cube 模板；租户 VM 中的 Chrome/CDP 在本机嵌套 KVM 路径长期不响应。该镜像及模板仅作为调研记录保留。产品桌面已改到 Docker，Docker build context 在完成后清理，租户运行时不执行 apt 安装桌面。 [CubeSandbox 桌面示例](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/README.md) · [CubeSandbox Dockerfile](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/examples/ubuntu-desktop/Dockerfile) · [CubeSandbox 自定义镜像指南](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/tutorials/bring-your-own-image.md)
 
 | 复用来源 | 迁入内容 |
 | --- | --- |
 | Coke Dots `4213e76`，`src/web/ComputerView.tsx`、`src/web/TaskArtifacts.tsx`、`src/web/main.tsx` | 任务页、Activity、附件入口、桌面查看和接管状态。保留同源 API，重标品牌并接入新的任务及电脑状态。 [电脑组件](https://github.com/cokepoppy/coke-dots/blob/4213e769e49da7a479ab2ad186584c77b721fa69/src/web/ComputerView.tsx) |
-| Coke Dots `4213e76`，`deploy/linux-desktop/` | XFCE、Xvfb、VNC/websockify、浏览器持久 profile、渲染探针与桌面 worker。将 Pod 生命周期和 PVC 交接改成 Cube 模板、真实桌面探针与租户盘。 [桌面源码](https://github.com/cokepoppy/coke-dots/tree/4213e769e49da7a479ab2ad186584c77b721fa69/deploy/linux-desktop) |
+| Coke Dots `4213e76`，`deploy/linux-desktop/` | 复用 XFCE、Xvfb、VNC/websockify、浏览器持久 profile 和桌面 worker；产品层桌面进程运行于每租户 Docker 容器，profile 放在租户专属命名卷。 [桌面源码](https://github.com/cokepoppy/coke-dots/tree/4213e769e49da7a479ab2ad186584c77b721fa69/deploy/linux-desktop) |
 | Coke Grok Bot `f917138`，`deploy/desktop/` | 复用 DSH SDK 接入、`dsh-computer-plugin.mjs`、`computer-tools.mjs` 的工具注册、截图传图、浏览器目标选择和中止处理。DSH 独立使用它的锁定版本组作为验证起点，先在目标镜像确认兼容性。 [DSH 与电脑插件](https://github.com/cokepoppy/coke-grok-bot/tree/f917138bbdc8821ec9045e6730d2d6abdd5253b8/deploy/desktop) |
 | Coke Grok Bot `f917138`，`src/server/tenant-store.ts`、`src/server/run-store.ts` | 复用 `mysql2` 的事务、会话归属校验和任务回写模式，按个人租户缩减表与状态。 [租户存储](https://github.com/cokepoppy/coke-grok-bot/blob/f917138bbdc8821ec9045e6730d2d6abdd5253b8/src/server/tenant-store.ts) · [任务存储](https://github.com/cokepoppy/coke-grok-bot/blob/f917138bbdc8821ec9045e6730d2d6abdd5253b8/src/server/run-store.ts) |
 
-DSH 在 VM 内通过本地工具访问同一个 Chrome 实例和 X11 屏幕。Browser Use 用 DOM 语义定位、导航与操作。Computer Use 用完整屏幕截图、鼠标和键盘，能操作终端及浏览器以外的窗口。选 DeepSeek `deepseek-flash` 作为首个模型候选，官方支持视觉输入。验收需用配置的真实模型和 DSH 版本证明工具截图被模型收到并用于下一次点击或键盘动作。图片能力与工具结果的编码要一起测，最终选用能传图的官方协议。 [DSH SDK 项目](https://github.com/deepseek-ai/deepseek-harness) · [DeepSeek 视觉输入](https://api-docs.deepseek.com/guides/vision/)
+Docker 容器内的 DSH 通过本机插件访问同一个 Chrome 实例和 X11 屏幕；Bash 工具被禁用，只有 `computer_terminal` 通过短期 token 调用对应 Cube microVM。Browser Use 用 DOM 语义定位、导航与操作；Computer Use 用屏幕截图、鼠标和键盘操作桌面。DeepSeek `deepseek-flash` 是首个真实模型验收路径。完整的 noVNC 人工接管和交还仍需从产品页面验收。 [DSH SDK 项目](https://github.com/deepseek-ai/deepseek-harness) · [DeepSeek 视觉输入](https://api-docs.deepseek.com/guides/vision/)
 
 ### 接管与隔离
 
-- **桌面共享。** Agent 操作时页面展示实时更新的画面。用户点击接管后，guest worker 暂停任务、收回 Agent 的工具权限并确认当前输入已停止，再开放同源 WebSocket 的 noVNC 输入。交还后关闭该输入连接、重新读取当前 Chrome 标签页，再继续原任务。摄屏探针保持窗口焦点，接管期间的登录画面、按键与凭据留在用户和 VM 之间。用首次画面解码与可见输入验证连接。
+- **桌面共享。** Agent 操作时页面展示实时更新的容器桌面画面。用户点击接管时，服务端暂停该任务的 Agent 工具调用，再开放到该租户容器的同源 noVNC WebSocket。站点要求登录或验证码时用户在同一桌面完成操作；交还后 Agent 读取当前页面状态并继续原任务。上述完整人工交接路径仍是待验收项。
 - **免审批与租户边界。** 测试账号登录后继承所属 VM 的全部常规电脑能力，只有实际网页登录或验证码提示自动接管。`allowPublicTraffic=false`，后端为选定 sandbox 的上游 HTTP 与 WebSocket 请求注入 `e2b-traffic-access-token`。浏览器从应用接收受信任的 noVNC 客户端和桌面数据。CDP、VNC 原始端口、`envd` 及通用 Cube 管理权限留在内部。 [CubeSandbox 私有访问](https://github.com/TencentCloud/CubeSandbox/blob/v0.8.0/docs/guide/restrict-public-access.md)
 - **公网使用。** 客体正常访问公网和 apt/npm/PyPI。私网隔离验证覆盖同节点其他租户、宿主机、数据库、管理 API 和云元数据。模型调用由同一个 TS 服务的内部端点转发，以短期的 VM/任务凭证绑定当前租户。模型提供方密钥只由服务端保存，镜像与磁盘快照只包含租户自己的数据。 [CubeSandbox 出网策略](https://docs.cubesandbox.com/guide/network-policy)
 
@@ -123,7 +151,7 @@ DSH 在 VM 内通过本地工具访问同一个 Chrome 实例和 X11 屏幕。Br
 
 ### 链路日志与错误定位
 
-`run_events` 是每条任务的持久化事件源：从 API 接收任务、队列调度、模型配置、Cube 控制面与 microVM、Linux 桌面初始化、guest runtime 安装/复用，到 DSH 初始化、模型调用、工具通知、接管和结果回写，都按同一 `tenant_id`、`run_id` 与递增序号记录。前端通过现有 SSE 流接收这些事件；“调试模式”显示完整链路、秒级时间、组件、阶段、耗时和可展开的结构化详情。失败阶段会在时间线顶部显示红色诊断卡，即使任务尚未完成也会立即提示。
+`run_events` 是每条任务的持久化事件源：从 API 接收任务、队列调度、模型配置、Cube 控制面与 microVM、Docker 桌面和 Chrome 就绪、DSH 初始化、模型调用、远程工具通知、接管和结果回写，都按同一 `tenant_id`、`run_id` 与递增序号记录。前端通过现有 SSE 流接收这些事件；“调试模式”显示完整链路、秒级时间、组件、阶段、耗时和可展开的结构化详情。失败阶段会在时间线顶部显示红色诊断卡，即使任务尚未完成也会立即提示。
 
 同一事件以 JSON 行写到应用 `stdout`，字段包含时间、租户 ID、Run ID、序号、组件、阶段和级别，便于本机开发终端或部署时的服务日志收集器按 Run ID 检索。`stderr` 保留给启动、基础设施错误，以及事件无法写入 MySQL 时的降级诊断。敏感字段在持久化和打印前过滤/脱敏。日志不写额外文件或 Docker 容器，避免本机磁盘被日志占满；MySQL 保存给产品页面和任务恢复使用，标准输出用于运维检索。
 
@@ -173,9 +201,9 @@ DSH 在 VM 内通过本地工具访问同一个 Chrome 实例和 X11 屏幕。Br
 
 最终从已登录的 Coke Super Agent 网页完成上述任务和接管链路。每轮记录对应的 Git SHA、Cube 模板、DSH/模型版本、租户电脑标识、用户可见结果与端到端用例。KVM 探针、接口连通和桌面首帧用于定位各层问题，完整产品验收以真实任务结果、接管后继续和双租户数据为准。
 
-### CubeSandbox 官方桌面/Chromium 参考（2026-11-24）
+### CubeSandbox 官方桌面/Chromium 参考（2026-11-24，历史 microVM 桌面方案）
 
-CubeSandbox 官方示例把 headless Browser Sandbox（Chromium + Playwright/CDP，端口 9000）和 Ubuntu Desktop Sandbox（GNOME + noVNC，端口 6080）分开。本项目采纳官方示例的构建时安装 OCI 镜像、Cube 再转换为模板的流程，不创建第二台 Browser Sandbox；noVNC 与 CDP 操作同一台租户 VM 的同一个 Chromium profile。官方 Dockerfile 以 `cubesandbox-base:2026.16` 为基底，启动脚本优先用 dummy Xorg、失败回退 Xvfb，并用 system D-Bus、`systemd-logind`、`dbus-run-session` 启动 GNOME。官方模板示例配置为 4 CPU、8 GiB 内存和 16 GiB writable layer；本项目先保留轻量目标，完成 GUI 性能与内存测量再决定是否采用 GNOME 原规格。上游 [#1505](https://github.com/TencentCloud/CubeSandbox/issues/1505) 记录 VNC 图形浏览在 PVM/nested virtualization 下的卡顿，Mac → Lima → MicroVM 仍需实测。
+CubeSandbox 官方示例把 headless Browser Sandbox（Chromium + Playwright/CDP，端口 9000）和 Ubuntu Desktop Sandbox（GNOME + noVNC，端口 6080）分开。早期方案曾采纳构建 OCI 镜像再转为 Cube 模板的流程，让 noVNC 与 CDP 操作同一台 microVM 的同一个 Chromium profile；嵌套 KVM 中的 Chrome/CDP 卡顿促使产品桌面改放 Docker。官方 Dockerfile、dummy Xorg/Xvfb 与 D-Bus 启动说明仍可作为桌面排障参考，但不表示当前桌面运行在 microVM。上游 [#1505](https://github.com/TencentCloud/CubeSandbox/issues/1505) 记录 VNC 图形浏览在 PVM/nested virtualization 下的卡顿。
 
 **最新生命周期进展（2026-11-24）：** 两个无 apt 的 disposable probe 都从 desktop-base-v2 创建并通过前台 PTY 持续监视；guest PID 1 是 Python，没有 systemd/journalctl/ps。VMM 在约 114 秒记录一次 `VmExit::Shutdown`；另一次即使 PTY 继续输出，Cube 仍在 host elapsed 136 秒报告 `unknown / Failed`。因此 PTY 命令自然结束不是充分解释，Cube `timeout=-1` 已请求但退出发起者仍未知。只在观察退出后清理临时 VM，未创建快照或改租户实例。下一步读取这两个 sandbox ID 对应的 CubeShim/VMM 日志并核对 base template 的 guest init；同时，生命周期退出检测已加到构建器但尚待 fresh builder 验证。预构建桌面镜像会避免每租户重复 apt，但不替代这项根因排查。详见[事故记录](template-build-incident-2026-11-21.md#2026-11-24-no-apt-foreground-probes-still-exit)。
 

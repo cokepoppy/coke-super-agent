@@ -18,12 +18,12 @@
     "macos:install-public-services": "bash scripts/macos/install-public-services.sh",
     "db:migrate": "tsx src/server/migrate.ts",
     "db:seed": "tsx src/server/seed.ts",
-    "test:dsh-runtime": "node --test scripts/cube/dsh-runtime/*.test.mjs",
+    "docker:desktop-image": "bash scripts/docker/build-csa-docker-desktop-image.sh",
     "cube:desktop-image": "tsx scripts/cube/build-desktop-image.ts",
     "cube:desktop-template": "tsx scripts/cube/create-desktop-template.ts",
-    "cube:prepare-dsh-template": "tsx scripts/cube/prepare-dsh-template.ts",
     "test": "tsx --test src/server/*.test.ts",
-    "test:public-routing": "node --test tests/public-routing.test.mjs"
+    "test:public-routing": "node --test tests/public-routing.test.mjs",
+    "test:dsh-runtime": "node --test scripts/cube/dsh-runtime/*.test.mjs"
   },
   "dependencies": {
     "@cubesandbox/sdk": "0.8.0",

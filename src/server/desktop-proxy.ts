@@ -4,6 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { Sandbox } from '@cubesandbox/sdk';
 import { config } from './config.ts';
 import { cubeConfig, DesktopNotReadyError, getTenantDesktopCredential } from './computer.ts';
+import { getTenantDockerDesktopTarget } from './docker-desktop.ts';
 
 const routePrefix = '/api/computer/desktop/';
 const sandboxHosts = new Map<string, Promise<string>>();
@@ -42,6 +43,11 @@ async function hostForSandbox(sandboxId: string): Promise<string> {
 }
 
 async function desktopTarget(tenantId: string): Promise<{ hostname: string; hostHeader: string; port: number; protocol: 'http:' | 'https:'; trafficToken: string }> {
+  if (config.agent.dshPlacement === 'docker' && config.agent.runtime === 'dsh') {
+    await getTenantDesktopCredential(tenantId);
+    const target = await getTenantDockerDesktopTarget(tenantId);
+    return { hostname: target.hostname, hostHeader: `localhost:${target.port}`, port: target.port, protocol: 'http:', trafficToken: '' };
+  }
   const { sandboxId, trafficToken } = await getTenantDesktopCredential(tenantId);
   const hostHeader = await hostForSandbox(sandboxId);
   const protocol = config.cube.proxyScheme === 'https' ? 'https:' : 'http:';
@@ -53,9 +59,11 @@ async function desktopTarget(tenantId: string): Promise<{ hostname: string; host
 function forwardedHeaders(req: IncomingMessage, hostHeader: string, trafficToken: string, websocket = false): Record<string, string | string[]> {
   const headers: Record<string, string | string[]> = {
     host: hostHeader,
-    'e2b-traffic-access-token': trafficToken,
-    'cube-traffic-access-token': trafficToken,
   };
+  if (trafficToken) {
+    headers['e2b-traffic-access-token'] = trafficToken;
+    headers['cube-traffic-access-token'] = trafficToken;
+  }
   for (const [name, value] of Object.entries(req.headers)) {
     if (typeof value === 'undefined' || name === 'host' || name === 'cookie' || name === 'authorization' || name === 'origin') continue;
     if (!allowedRequestHeaders.has(name)) continue;

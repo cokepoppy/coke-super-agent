@@ -65,6 +65,8 @@ try {
     'find /usr/share/novnc -type l -print',
   ].join('\n'), { timeoutMs: 30_000 });
   if (metadata.exitCode !== 0) throw new Error('Could not package the guest noVNC application assets: ' + metadata.stderr.slice(-800));
+  const packageVersion = metadata.stdout.match(/^novnc\.version=(\S+)$/m)?.[1];
+  if (!packageVersion) throw new Error('The guest noVNC Debian package version was not reported.');
 
   const archive = Buffer.from(await sandbox.files.read(remoteArchive, { format: 'bytes' }));
   if (archive.byteLength === 0 || archive.byteLength > 16 * 1024 * 1024) throw new Error('The noVNC archive size is outside the expected 0–16 MiB range.');
@@ -102,8 +104,9 @@ try {
     'Upstream project: https://github.com/novnc/noVNC',
     '',
   ].join('\n'), { mode: 0o644 });
+  await writeFile(resolve(targetDir, 'package.json'), JSON.stringify({ name: 'novnc', version: packageVersion }, null, 2) + '\n', { mode: 0o644 });
 
-  const expectedPaths = ['vnc.html', 'app/ui.js', 'core/rfb.js', 'vendor'];
+  const expectedPaths = ['vnc.html', 'app/ui.js', 'core/rfb.js', 'vendor', 'package.json'];
   for (const path of expectedPaths) await access(resolve(targetDir, path));
   const totals = await countTree(targetDir);
   const digest = createHash('sha256').update(archive).digest('hex');

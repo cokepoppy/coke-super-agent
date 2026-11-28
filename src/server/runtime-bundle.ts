@@ -91,11 +91,6 @@ export async function runGuestPty(
 const uploadChunkBytes = 4 * 1024 * 1024;
 const uploadConcurrency = 2;
 const uploadMaxAttempts = 5;
-// A 2026-11-28 ARM64 microVM run needed about eight minutes to upload the
-// 144 MB DSH archive, then took roughly eight minutes to concatenate only
-// 24/35 chunks in the guest. Keep this bounded while allowing the observed
-// slow guest filesystem path enough time to finish a cold install.
-const assemblyTimeoutMs = 20 * 60_000;
 
 export async function stageRuntimeBundle(
   sandbox: Sandbox,
@@ -274,7 +269,7 @@ export async function stageRuntimeBundle(
       '  for part in "${parts[@]}"; do',
       '    cat "$part" >> "$archive_tmp"',
       '    index=$((index + 1))',
-      '    if (( index % 4 == 0 || index == ${#parts[@]} )); then printf "csa_bundle_assembly %s/%s\\n" "$index" "${#parts[@]}"; fi',
+      '    if (( index % 8 == 0 || index == ${#parts[@]} )); then printf "csa_bundle_assembly %s/%s\\n" "$index" "${#parts[@]}"; fi',
       '  done',
       '  actual_size="$(wc -c < "$archive_tmp")"',
       '  if [[ "$actual_size" -ne "$expected_size" ]]; then echo "archive size mismatch: $actual_size" >&2; exit 42; fi',
@@ -298,7 +293,7 @@ export async function stageRuntimeBundle(
     await reportProgress({ stage: 'assembly.process.started', level: 'info', message: '拼接进程已启动，等待大小和 SHA-256 校验结果。', details: { uploadId } });
 
     const assemblyStartedAt = Date.now();
-    const assemblyDeadline = assemblyStartedAt + assemblyTimeoutMs;
+    const assemblyDeadline = assemblyStartedAt + 10 * 60_000;
     const assemblyOutputDecoder = new TextDecoder();
     let assemblyOutputPending = '';
     let assemblyOutputBytes = 0;
@@ -335,7 +330,7 @@ export async function stageRuntimeBundle(
     }
     if (assemblyOutcome === null) {
       await assemblyHandle.kill().catch(() => false);
-      throw new Error(`等待 microVM 拼接并校验依赖包超过 ${Math.round(assemblyTimeoutMs / 60_000)} 分钟。`);
+      throw new Error('等待 microVM 拼接并校验依赖包超过 10 分钟。');
     }
     if ('error' in assemblyOutcome) {
       const message = `microVM 内依赖包拼接进程异常退出：${safeUploadError(assemblyOutcome.error)}`;

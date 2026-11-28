@@ -36,8 +36,16 @@ export const config = {
     limaCommand: process.env.CSA_LIMACTL || join(homedir(), 'Library/Application Support/Coke Super Agent/lab/lima-2.3.0/bin/limactl'),
     limaHome: process.env.LIMA_HOME || join(homedir(), '.local/share/csa-cube-node/lima'),
   },
+  docker: {
+    executable: process.env.CSA_DOCKER_EXECUTABLE || 'docker',
+    desktopImage: process.env.CSA_DOCKER_DESKTOP_IMAGE || 'csa-super-agent-desktop:20261127.9',
+    desktopCpus: process.env.CSA_DOCKER_DESKTOP_CPUS || '2',
+    desktopMemory: process.env.CSA_DOCKER_DESKTOP_MEMORY || '3g',
+    desktopShmSize: process.env.CSA_DOCKER_DESKTOP_SHM_SIZE || '1g',
+  },
   agent: {
     runtime: (process.env.CSA_AGENT_RUNTIME || 'dsh').trim().toLowerCase(),
+    dshPlacement: (process.env.CSA_DSH_PLACEMENT || 'docker').trim().toLowerCase(),
     apiKey: process.env.DEEPSEEK_API_KEY || '',
     baseUrl: deepseekBaseUrl,
     piBaseUrl: piDeepseekBaseUrl,
@@ -50,4 +58,8 @@ export const config = {
 
 if (!config.mysql.user || !config.mysql.password) {
   throw new Error('MYSQL_USER and MYSQL_PASSWORD are required. Copy .env.example to .env and set local database credentials.');
+}
+
+if (config.agent.dshPlacement !== 'docker') {
+  throw new Error('CSA_DSH_PLACEMENT must be docker. DSH inside a Cube microVM is disabled.');
 }

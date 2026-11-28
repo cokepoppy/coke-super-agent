@@ -241,6 +241,7 @@ export function apply(ctx) {
             pageOrigin: safeUrlOrigin(result.url || page.state?.url || ''),
             titleLength: typeof result.title === 'string' ? result.title.length : 0,
             textLength: typeof result.text === 'string' ? result.text.length : 0,
+        headingCount: Array.isArray(result.headings) ? result.headings.length : 0,
             controlCount: Array.isArray(result.controls) ? result.controls.length : 0,
             durationMs: Date.now() - startedAt,
           });
@@ -720,12 +721,20 @@ async function bringPageToFront(page) {
 async function inspectPage(page) {
   const result = await evaluatePage(page, `(() => {
     const text = document.body?.innerText || '';
+    const visible = element => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const headings = [...document.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"]')]
+      .filter(visible)
+      .slice(0, 30)
+      .map(element => ({
+        level: /^H[1-6]$/.test(element.tagName) ? Number(element.tagName.slice(1)) : Number(element.getAttribute('aria-level') || 0) || null,
+        text: (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 500),
+      }));
     const controls = [...document.querySelectorAll('a,button,input,textarea,select,[role="button"]')]
-      .filter(element => {
-        const rect = element.getBoundingClientRect();
-        const style = getComputedStyle(element);
-        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-      })
+      .filter(visible)
       .slice(0, 100)
       .map(element => ({
         tag: element.tagName.toLowerCase(),
@@ -740,7 +749,7 @@ async function inspectPage(page) {
           ? !['password', 'hidden'].includes((element.type || '').toLowerCase()) ? element.value.length : undefined
           : undefined,
       }));
-    return { url: location.href, title: document.title, text: text.slice(0, 30000), controls };
+    return { url: location.href, title: document.title, text: text.slice(0, 30000), headings, controls };
   })()`, true);
   return result.value || {};
 }
