@@ -9,6 +9,7 @@ import type { RunStatus, RunTraceEvent } from '../shared/types.ts';
 import { hasSupportedPiRuntimeContract } from '../shared/pi-runtime-contract.ts';
 import { createPiRuntimeKey } from '../shared/pi-runtime-key.ts';
 import { connectTenantSandbox, getTenantComputer, startTenantComputer } from './computer.ts';
+import { waitForTenantDesktopReady } from './desktop-readiness.ts';
 import { config } from './config.ts';
 import { pool } from './db.ts';
 import { runGuestPty, stageRuntimeBundle, startGuestPty } from './runtime-bundle.ts';
@@ -56,6 +57,7 @@ const hostBundlePromises = new Map<string, Promise<HostRuntimeBundle>>();
 const runtimeErrorLogAt = new Map<string, number>();
 const runtimeErrorLogSuppressed = new Map<string, number>();
 const guestTerminalExitGraceMs = 35_000;
+const desktopReadinessTimeoutMs = 8 * 60_000;
 
 export function startAgentRuntime(): void {
   stopped = false;
@@ -186,6 +188,28 @@ async function executeRun(run: PendingRun): Promise<void> {
   if (computer.state === 'creating') throw new Error('等待租户 Linux microVM 启动超时，请稍后重试。');
   if (computer.state !== 'running') throw new Error('租户 Linux microVM 启动失败，请到“云电脑”页面检查状态。');
 
+  const desktopWaitStartedAt = Date.now();
+  await trace(run, { component: 'desktop', stage: 'task.readiness.wait.start', level: 'info', message: 'Agent Runtime 等待租户桌面健康检查通过后再启动任务。', details: { timeoutMs: desktopReadinessTimeoutMs, desktopState: computer.desktopState } });
+  const readyComputer = await waitForTenantDesktopReady(
+    () => getTenantComputer(run.tenant_id),
+    {
+      timeoutMs: desktopReadinessTimeoutMs,
+      pollIntervalMs: 2_000,
+      isCancelled: () => stopped,
+      onPending: (current, elapsedMs) => trace(run, {
+        component: 'desktop',
+        stage: 'task.readiness.wait',
+        level: 'info',
+        message: '租户桌面仍在初始化；Agent Runtime 尚未启动，正在检查 MySQL 中的最新状态。',
+        durationMs: elapsedMs,
+        details: { computerState: current.state, desktopState: current.desktopState },
+      }),
+    },
+  );
+  if (!readyComputer || stopped) return;
+  computer = readyComputer;
+  await trace(run, { component: 'desktop', stage: 'task.readiness.ready', level: 'info', message: '租户桌面健康检查通过，Agent Runtime 现在开始准备任务目录。', durationMs: Date.now() - desktopWaitStartedAt, details: { computerState: computer.state, desktopState: computer.desktopState } });
+
   const sandbox = await connectTenantSandbox(run.tenant_id);
   try {
     await trace(run, { component: 'cube', stage: 'sandbox.data-plane.connected', level: 'info', message: '已连接租户 microVM 数据面，开始准备任务工作目录。', details: { computerState: computer.state, desktopState: computer.desktopState } });
@@ -204,6 +228,7 @@ async function executeRun(run: PendingRun): Promise<void> {
       packageLock: await readFile(resolve(guestPackageDirectory, 'package-lock.json'), 'utf8'),
       runtimeManifest: await readFile(guestRuntimeManifest, 'utf8'),
       runtimeSource: await readFile(guestRuntimeScript, 'utf8'),
+      sessionBudgetSource: await readFile(resolve(guestPackageDirectory, 'session-budget.mjs'), 'utf8'),
       computerSource: await readFile(guestComputerPlugin, 'utf8'),
       chromeBridgeSource: await readFile(guestChromePipeBridge, 'utf8'),
       runtimeLauncher: await readFile(guestRuntimeLauncher, 'utf8'),
@@ -348,6 +373,7 @@ async function installGuestRuntime(
     packageLock: string;
     runtimeManifest: string;
     runtimeSource: string;
+    sessionBudgetSource: string;
     computerSource: string;
     chromeBridgeSource: string;
     runtimeLauncher: string;
@@ -365,7 +391,7 @@ async function installGuestRuntime(
     throw new Error('Pinned DeepSeek Harness SDK and runtime version manifest is invalid.');
   }
   const runtimeBundleBuilder = await readFile(hostBundleScript, 'utf8');
-  const runtimeKey = createHash('sha256').update(packageLock).update('\0').update(files.runtimeManifest).update('\0').update(runtimeBundleBuilder).update('\0').update(files.runtimeSource).update('\0').update(files.computerSource).update('\0').update(files.chromeBridgeSource).update('\0').update(files.runtimeLauncher).update('\0').update(files.bootstrapSource).update('\0').update(files.bootstrapWrapper).digest('hex');
+  const runtimeKey = createHash('sha256').update(packageLock).update('\0').update(files.runtimeManifest).update('\0').update(runtimeBundleBuilder).update('\0').update(files.runtimeSource).update('\0').update(files.sessionBudgetSource).update('\0').update(files.computerSource).update('\0').update(files.chromeBridgeSource).update('\0').update(files.runtimeLauncher).update('\0').update(files.bootstrapSource).update('\0').update(files.bootstrapWrapper).digest('hex');
   await trace(run, { component: 'runtime-install', stage: 'runtime.inspect', level: 'info', message: '检查 microVM 内的 DeepSeek Harness SDK 与官方可执行 runtime 版本。', details: { runtimeKey: runtimeKey.slice(0, 16), runtimeVersion } });
   try {
     if (await sandbox.files.exists('/var/lib/csa-agent-runtime/ready') &&

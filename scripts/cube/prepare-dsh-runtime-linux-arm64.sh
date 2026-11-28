@@ -55,7 +55,7 @@ log_stage preflight.start pid=$$ platform="$(uname -s)" architecture="$(uname -m
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$repo_root"
 package_dir="$repo_root/scripts/cube/dsh-runtime"
-cache_root="${CSA_AGENT_RUNTIME_CACHE_DIR:-$HOME/.local/share/csa-cube-node/runtime-cache}"
+cache_root="${CSA_AGENT_RUNTIME_CACHE_DIR:-$HOME/.cache/csa-cube-node/runtime-cache}"
 proxy="${CSA_NPM_HTTP_PROXY:-}"
 
 if [[ -z "$proxy" ]]; then
@@ -80,7 +80,7 @@ if [[ "$runtime_version" != "0.2.2-rc.2" || ! "$wheel_sha256" =~ ^[a-f0-9]{64}$ 
 fi
 
 lock_hash="$(shasum -a 256 "$package_dir/package-lock.json" | cut -d' ' -f1)"
-runtime_key="$(cat "$package_dir/package-lock.json" <(printf '\0') "$package_dir/runtime-manifest.json" <(printf '\0') "$0" <(printf '\0') "$package_dir/run-task.mjs" <(printf '\0') "$package_dir/computer-plugin.mjs" <(printf '\0') "$package_dir/chrome-cdp-pipe-bridge.mjs" <(printf '\0') "$package_dir/dsh-runtime-launcher.mjs" <(printf '\0') "$repo_root/scripts/cube/bootstrap-dsh-runtime.sh" <(printf '\0') "$repo_root/scripts/cube/run-dsh-runtime-bootstrap.sh" | shasum -a 256 | cut -d' ' -f1)"
+runtime_key="$(cat "$package_dir/package-lock.json" <(printf '\0') "$package_dir/runtime-manifest.json" <(printf '\0') "$0" <(printf '\0') "$package_dir/run-task.mjs" <(printf '\0') "$package_dir/session-budget.mjs" <(printf '\0') "$package_dir/computer-plugin.mjs" <(printf '\0') "$package_dir/chrome-cdp-pipe-bridge.mjs" <(printf '\0') "$package_dir/dsh-runtime-launcher.mjs" <(printf '\0') "$repo_root/scripts/cube/bootstrap-dsh-runtime.sh" <(printf '\0') "$repo_root/scripts/cube/run-dsh-runtime-bootstrap.sh" | shasum -a 256 | cut -d' ' -f1)"
 mkdir -p "$cache_root"
 log_disk_space preflight "$cache_root"
 archive="$cache_root/dsh-runtime-linux-arm64-${runtime_key}.tar.gz"

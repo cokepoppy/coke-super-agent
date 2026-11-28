@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { maxSessionRunDurationMs, maxSessionRunSteps } from './session-budget.mjs';
 
 if (process.env.CSA_DSH_BUNDLE_IMPORT_SMOKE === '1') {
   const { DeepSeekHarness } = await import('@deepseek-ai/dsh-sdk-client');
@@ -29,8 +30,6 @@ if (!uuid.test(String(task.threadId || '')) || typeof task.prompt !== 'string' |
 const dshHome = path.join(workspaceRoot, '.csa-super-agent', 'dsh-home');
 const taskWorkspace = path.join(workspaceRoot, 'tasks', task.threadId);
 const userHome = '/workspace/.desktop-home';
-const maxSessionRunDurationMs = 25 * 60_000;
-const maxSessionRunSteps = 20;
 const shutdownTimeoutMs = 15_000;
 const disposeEofGraceMs = 15_000;
 const disposeGraceMs = 30_000;

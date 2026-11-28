@@ -123,7 +123,7 @@ export async function getTenantComputer(tenantId: string): Promise<ComputerView>
   return view(rows[0]);
 }
 
-async function reserveOperation(tenantId: string, connection: PoolConnection, purpose: 'desktop' | 'task'): Promise<ComputerOperation | null> {
+async function reserveOperation(tenantId: string, connection: PoolConnection): Promise<ComputerOperation | null> {
   await connection.beginTransaction();
   let committed = false;
   try {
@@ -143,7 +143,7 @@ async function reserveOperation(tenantId: string, connection: PoolConnection, pu
     }
     if (current.create_pending && !current.sandbox_id) throw new ComputerRecoveryRequiredError(uncertainCreateMessage);
     if (current.state === 'running' && current.sandbox_id && current.cube_traffic_token_ciphertext) {
-      if (purpose === 'task' || current.desktop_state === 'ready' || current.desktop_state === 'installing' || desktopBootstrapByTenant.has(tenantId)) {
+      if (current.desktop_state === 'ready' || current.desktop_state === 'installing' || desktopBootstrapByTenant.has(tenantId)) {
         await connection.commit();
         committed = true;
         return null;
@@ -208,7 +208,7 @@ export async function startTenantComputer(tenantId: string, options: ComputerSta
   }
   let operation: ComputerOperation | null;
   try {
-    operation = await reserveOperation(tenantId, connection, purpose);
+    operation = await reserveOperation(tenantId, connection);
     await emitTrace(trace, { component: 'database', stage: 'computer.operation.reserve.complete', level: 'info', message: 'MySQL 云电脑操作预约事务已完成。', durationMs: Date.now() - reserveStartedAt, details: { generation: operation?.generation ?? null, reserved: Boolean(operation) } }, tenantId, runId);
   } catch (error) {
     await emitTrace(trace, { component: 'database', stage: 'computer.operation.reserve.failed', level: 'error', message: 'MySQL 云电脑操作预约事务失败。', durationMs: Date.now() - reserveStartedAt, details: errorDetails(error) }, tenantId, runId);
@@ -218,7 +218,7 @@ export async function startTenantComputer(tenantId: string, options: ComputerSta
   }
   if (!operation) {
     const current = await getTenantComputer(tenantId);
-    if (purpose === 'desktop' && current.state === 'running' && current.desktopState === 'ready') {
+    if (current.state === 'running' && current.desktopState === 'ready') {
       const [rows] = await pool.execute<ComputerRow[]>(
         'SELECT sandbox_id, generation FROM computers WHERE tenant_id = ? AND state = \'running\' AND desktop_state = \'ready\' LIMIT 1',
         [tenantId],
