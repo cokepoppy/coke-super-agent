@@ -16,19 +16,43 @@ export interface RuntimeBundleProgressEvent {
   durationMs?: number;
 }
 
+export type GuestPtyStageEvent = {
+  stage: string;
+  details?: Record<string, string | number | boolean | null>;
+};
+
 export async function startGuestPty(
   sandbox: Sandbox,
   command: string,
   cwd: string,
   envs: Record<string, string> = {},
   disableEcho = false,
+  onStage?: (event: GuestPtyStageEvent) => void,
 ): Promise<PtyHandle> {
-  const handle = await sandbox.pty.create({ rows: 24, cols: 80 }, { cwd, envs, timeoutMs: 0 });
+  const createStartedAt = Date.now();
+  onStage?.({ stage: 'pty.create.start', details: { cwd } });
+  let handle: PtyHandle;
   try {
-    if (disableEcho) await handle.sendStdin('stty -echo 2>/dev/null || true\n', 15_000);
+    handle = await sandbox.pty.create({ rows: 24, cols: 80 }, { cwd, envs, timeoutMs: 0 });
+    onStage?.({ stage: 'pty.create.complete', details: { pid: handle.pid, durationMs: Date.now() - createStartedAt } });
+  } catch (error) {
+    onStage?.({ stage: 'pty.create.failed', details: { durationMs: Date.now() - createStartedAt, errorName: error instanceof Error ? error.name : 'Error' } });
+    throw error;
+  }
+  try {
+    if (disableEcho) {
+      const echoStartedAt = Date.now();
+      onStage?.({ stage: 'pty.echo-disable.start', details: { pid: handle.pid } });
+      await handle.sendStdin('stty -echo 2>/dev/null || true\n', 15_000);
+      onStage?.({ stage: 'pty.echo-disable.complete', details: { pid: handle.pid, durationMs: Date.now() - echoStartedAt } });
+    }
+    const commandStartedAt = Date.now();
+    onStage?.({ stage: 'pty.command-send.start', details: { pid: handle.pid, commandBytes: Buffer.byteLength(command, 'utf8') } });
     await handle.sendStdin(command + '\n', 15_000);
+    onStage?.({ stage: 'pty.command-send.complete', details: { pid: handle.pid, commandBytes: Buffer.byteLength(command, 'utf8'), durationMs: Date.now() - commandStartedAt } });
     return handle;
   } catch (error) {
+    onStage?.({ stage: 'pty.command-send.failed', details: { pid: handle.pid, durationMs: Date.now() - createStartedAt, errorName: error instanceof Error ? error.name : 'Error' } });
     handle.disconnect();
     throw error;
   }
@@ -42,18 +66,20 @@ export async function runGuestPty(
   onOutputLine?: (line: string) => void,
   maxDurationMs = 0,
   maxOutputBytes = Number.POSITIVE_INFINITY,
+  onStage?: (event: GuestPtyStageEvent) => void,
 ): Promise<{ exitCode: number; output: string; outputBytes: number; outputTruncated: boolean }> {
   // Replace Cube's interactive login shell with a non-interactive bash process.
   // Sending `exit $?` in the same PTY write is unreliable for long commands:
   // the command can finish and print its final marker while the login shell
   // remains attached, leaving wait() blocked indefinitely.
-  const handle = await startGuestPty(sandbox, `exec bash -c ${shellQuote(command)}`, cwd, envs, true);
+  const handle = await startGuestPty(sandbox, `exec bash -c ${shellQuote(command)}`, cwd, envs, true, onStage);
   const decoder = new TextDecoder();
   const outputParts: Buffer[] = [];
   const outputLimit = Number.isFinite(maxOutputBytes) ? Math.max(0, Math.floor(maxOutputBytes)) : Number.POSITIVE_INFINITY;
   let outputBytes = 0;
   let retainedOutputBytes = 0;
   let outputTruncated = false;
+  let firstOutput = true;
   let pendingLine = '';
   const collect = (text: string): void => {
     const data = Buffer.from(text, 'utf8');
@@ -75,26 +101,58 @@ export async function runGuestPty(
     }
   };
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const wait = handle.wait(chunk => collect(decoder.decode(chunk, { stream: true })));
-    const exitCode = maxDurationMs > 0
-      ? await Promise.race([
-        wait,
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error(`Guest PTY exceeded its ${maxDurationMs}ms build step limit.`)), maxDurationMs);
-        }),
-      ])
-      : await wait;
+  let deadlineExceeded = false;
+  const waitStartedAt = Date.now();
+  onStage?.({ stage: 'pty.wait.start', details: { pid: handle.pid, maxDurationMs } });
+  const result = (exitCode: number) => {
     collect(decoder.decode());
     if (pendingLine.trim()) onOutputLine?.(pendingLine.slice(0, 2400));
-    return {
+    const value = {
       exitCode,
       output: Buffer.concat(outputParts).toString('utf8'),
       outputBytes,
       outputTruncated,
     };
+    onStage?.({ stage: 'pty.wait.complete', details: { pid: handle.pid, exitCode, outputBytes, outputTruncated, durationMs: Date.now() - waitStartedAt } });
+    return value;
+  };
+  try {
+    const wait = handle.wait(chunk => {
+      if (firstOutput) {
+        firstOutput = false;
+        onStage?.({ stage: 'pty.output.first', details: { pid: handle.pid, firstChunkBytes: chunk.byteLength, durationMs: Date.now() - waitStartedAt } });
+      }
+      collect(decoder.decode(chunk, { stream: true }));
+    });
+    const exitCode = maxDurationMs > 0
+      ? await Promise.race([
+        wait,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            deadlineExceeded = true;
+            onStage?.({ stage: 'pty.wait.deadline-exceeded', details: { pid: handle.pid, maxDurationMs } });
+            reject(new Error(`Guest PTY exceeded its ${maxDurationMs}ms command limit.`));
+          }, maxDurationMs);
+        }),
+      ])
+      : await wait;
+    return result(exitCode);
   } catch (error) {
-    if (timeout) await handle.kill().catch(() => false);
+    if (deadlineExceeded) {
+      const killStartedAt = Date.now();
+      try {
+        const killed = await sandbox.pty.kill(handle.pid, 10_000);
+        onStage?.({ stage: 'pty.kill.complete', details: { pid: handle.pid, killed, durationMs: Date.now() - killStartedAt } });
+      } catch (killError) {
+        onStage?.({ stage: 'pty.kill.failed', details: { pid: handle.pid, durationMs: Date.now() - killStartedAt, errorName: killError instanceof Error ? killError.name : 'Error' } });
+      }
+      throw error;
+    }
+    if (handle.exitCode !== null) {
+      onStage?.({ stage: 'pty.wait.exit-status-reported-as-error', details: { pid: handle.pid, exitCode: handle.exitCode } });
+      return result(handle.exitCode);
+    }
+    onStage?.({ stage: 'pty.wait.failed', details: { pid: handle.pid, durationMs: Date.now() - waitStartedAt, errorName: error instanceof Error ? error.name : 'Error' } });
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);

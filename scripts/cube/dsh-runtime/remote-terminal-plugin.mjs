@@ -1,6 +1,7 @@
 const maxCommandLength = 64 * 1024;
 const maxOutputLength = 48 * 1024;
 const minimumTimeoutMs = 60_000;
+const bridgeResponseGraceMs = 60_000;
 
 export const name = 'coke-super-agent-remote-terminal';
 export const inject = ['tools'];
@@ -91,7 +92,8 @@ export function apply(ctx) {
       const startedAt = Date.now();
       log('remote-terminal.start', { commandBytes: Buffer.byteLength(args.command, 'utf8'), cwd, timeoutMs });
       try {
-        const timeoutSignal = AbortSignal.timeout(timeoutMs + 15_000);
+        const bridgeTimeoutMs = timeoutMs + bridgeResponseGraceMs;
+        const timeoutSignal = AbortSignal.timeout(bridgeTimeoutMs);
         const signal = execution.signal ? AbortSignal.any([execution.signal, timeoutSignal]) : timeoutSignal;
         const response = await fetch(bridge.url, {
           method: 'POST',

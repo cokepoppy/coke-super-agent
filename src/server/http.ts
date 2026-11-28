@@ -9,7 +9,7 @@ import { verifyAgentBridgeToken } from './agent-bridge-token.ts';
 import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie } from './auth.ts';
 import { pool } from './db.ts';
 import { config } from './config.ts';
-import { runGuestPty } from './runtime-bundle.ts';
+import { runGuestPty, type GuestPtyStageEvent } from './runtime-bundle.ts';
 import { createQueuedReplyRun, createQueuedRun, getRunDetail, listEventsAfter, listRecentActivity, listRuns, runExists } from './task-store.ts';
 import { ComputerNotConfiguredError, ComputerNotReadyError, ComputerOperationError, ComputerRecoveryRequiredError, DesktopNotReadyError, connectTenantSandbox, getTenantBrowserState, getTenantComputer, retryTenantBrowser, startTenantComputer } from './computer.ts';
 import { proxyDesktopHttp, proxyDesktopUpgrade } from './desktop-proxy.ts';
@@ -243,7 +243,16 @@ export function createHttpServer() {
           sandbox = await connectTenantSandbox(claims.tenantId);
           const maxOutputBytes = 48 * 1024;
           executionStage = 'cube.pty.run';
-          const result = await runGuestPty(sandbox, command, cwd, {}, undefined, Number(timeoutMs), maxOutputBytes);
+          const logPtyStage = (event: GuestPtyStageEvent): void => {
+            writeHttpLog(`agent.bridge.terminal.${event.stage}`, 'info', {
+              requestId,
+              tenantId: claims.tenantId,
+              runId: claims.runId,
+              transport: 'cube-pty',
+              ...(event.details || {}),
+            });
+          };
+          const result = await runGuestPty(sandbox, command, cwd, {}, undefined, Number(timeoutMs), maxOutputBytes, logPtyStage);
           const outputTruncated = result.outputTruncated;
           writeHttpLog('agent.bridge.terminal.complete', 'info', {
             requestId,

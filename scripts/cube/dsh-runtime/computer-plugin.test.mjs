@@ -102,3 +102,34 @@ test('returns an unsettled state after a bounded wait when the page keeps changi
   assert.equal(result.observedUrl, 'https://example.com/');
   assert.equal(result.elapsedMs, 1_000);
 });
+
+test('waits for rendered page text or controls after navigation before reporting settled', async () => {
+  const clock = fakeClock();
+  let reads = 0;
+  const result = await waitForBrowserActionSettle({
+    page: { targetId: 'taobao' },
+    previousTargetIds: new Set(['taobao']),
+    initialUrl: 'about:blank',
+    initialText: '',
+    requireObservableContent: true,
+    readTargets: async () => [{ id: 'taobao', type: 'page', url: 'https://www.taobao.com/' }],
+    readPage: async () => {
+      reads += 1;
+      const readyState = 'complete';
+      if (clock.now() < 400) return { url: 'https://www.taobao.com/', title: '淘宝', readyState, text: '', visibleControlCount: 0, navigationSerial: 1 };
+      return { url: 'https://www.taobao.com/', title: '淘宝', readyState, text: '搜索商品', visibleControlCount: 1, navigationSerial: 1 };
+    },
+    connectTarget: async target => ({ targetId: target.id }),
+    timeoutMs: 1_000,
+    minWaitMs: 200,
+    pollIntervalMs: 100,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  assert.equal(result.settled, true);
+  assert.equal(result.pageChanged, true);
+  assert.equal(result.contentChanged, true);
+  assert.equal(result.observedUrl, 'https://www.taobao.com/');
+  assert.ok(reads >= 5);
+});

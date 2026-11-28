@@ -54,6 +54,7 @@ export async function waitForBrowserActionSettle(options) {
     initialUrl = '',
     initialNavigationSerial = 0,
     initialText = '',
+    requireObservableContent = false,
     readTargets,
     readPage,
     connectTarget,
@@ -97,7 +98,10 @@ export async function waitForBrowserActionSettle(options) {
       stableSamples = fingerprint === lastFingerprint ? stableSamples + 1 : 0;
       lastFingerprint = fingerprint;
       const ready = latestState.readyState === 'interactive' || latestState.readyState === 'complete';
-      if (now() - startedAt >= minWaitMs && ready && stableSamples >= 2) {
+      const hasObservableContent = !requireObservableContent
+        || Boolean(String(latestState.text || '').trim())
+        || Number(latestState.visibleControlCount || 0) > 0;
+      if (now() - startedAt >= minWaitMs && ready && stableSamples >= 2 && hasObservableContent) {
         const urlChanged = Boolean(latestState.url && latestState.url !== initialUrl);
         const navigationObserved = Number(latestState.navigationSerial || 0) > initialNavigationSerial;
         const contentChanged = String(latestState.text || '') !== initialText;
@@ -259,14 +263,61 @@ export function apply(ctx) {
         const startedAt = Date.now();
         traceComputerTool('browser.navigate.start', { requestedOrigin: safeUrlOrigin(targetUrl) });
         try {
+          const beforeTargets = await readCdpTargets(1500).catch(() => []);
+          const previousTargetIds = new Set(beforeTargets.map(target => String(target.id || target.targetId || '')).filter(Boolean));
+          previousTargetIds.add(page.targetId);
+          const initialState = await observePageForSettlement(page).catch(() => ({
+            url: page.state?.url || page.info?.url || '',
+            title: '',
+            text: '',
+            readyState: 'unknown',
+            visibleControlCount: 0,
+            navigationSerial: page.state?.navigationSerial || 0,
+          }));
+          const initialUrl = initialState.url || page.state?.url || page.info?.url || '';
           await navigatePage(page, targetUrl);
-          traceComputerTool('browser.navigate.complete', { requestedOrigin: safeUrlOrigin(targetUrl), observedOrigin: safeUrlOrigin(page.state?.url || ''), durationMs: Date.now() - startedAt });
+          const settled = await waitForBrowserActionSettle({
+            page,
+            previousTargetIds,
+            initialUrl,
+            initialNavigationSerial: Number(initialState.navigationSerial || page.state?.navigationSerial || 0),
+            initialText: String(initialState.text || ''),
+            requireObservableContent: targetUrl !== 'about:blank',
+            readTargets: () => readCdpTargets(1500),
+            readPage: observePageForSettlement,
+            connectTarget: connectPageTarget,
+            timeoutMs: 5000,
+            minWaitMs: 1200,
+            pollIntervalMs: 200,
+          });
+          page = settled.page;
+          const result = await inspectPage(page);
+          const actionState = {
+            settled: settled.settled,
+            pageChanged: settled.pageChanged,
+            urlChanged: settled.urlChanged,
+            newPageOpened: settled.targetChanged,
+            navigationObserved: settled.navigationObserved,
+            contentChanged: settled.contentChanged,
+            observedUrl: result.url || settled.observedUrl,
+            durationMs: Date.now() - startedAt,
+          };
+          traceComputerTool('browser.navigate.complete', {
+            requestedOrigin: safeUrlOrigin(targetUrl),
+            observedOrigin: safeUrlOrigin(result.url || settled.observedUrl),
+            settled: settled.settled,
+            settleDurationMs: settled.elapsedMs,
+            titleLength: typeof result.title === 'string' ? result.title.length : 0,
+            textLength: typeof result.text === 'string' ? result.text.length : 0,
+            headingCount: Array.isArray(result.headings) ? result.headings.length : 0,
+            controlCount: Array.isArray(result.controls) ? result.controls.length : 0,
+            durationMs: Date.now() - startedAt,
+          });
+          return { text: JSON.stringify({ action: args.action, ...result, actionState }) };
         } catch (error) {
           traceComputerTool('browser.navigate.failed', { requestedOrigin: safeUrlOrigin(targetUrl), observedOrigin: safeUrlOrigin(page.state?.url || ''), durationMs: Date.now() - startedAt, errorName: error instanceof Error ? error.name : 'Error', errorMessage: error instanceof Error ? error.message : String(error) }, 'error');
           throw error;
         }
-        const state = page.state || pageStates.get(page.sessionId);
-        return { text: JSON.stringify({ action: args.action, url: state?.url || targetUrl, ready: Boolean(state?.ready) }) };
       } else if (args.action === 'upload_file') {
         if (typeof args.path !== 'string' || !path.isAbsolute(args.path)) throw new Error('Use an absolute file path in the tenant workspace.');
         await access(args.path);
@@ -760,6 +811,11 @@ async function observePageForSettlement(page) {
     title: document.title,
     readyState: document.readyState,
     text: (document.body?.innerText || '').slice(0, 4096),
+    visibleControlCount: [...document.querySelectorAll('a,button,input,textarea,select,[role="button"],[role="textbox"],[role="searchbox"]')].filter(element => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    }).length,
   }))()`, true, Math.min(cdpCommandTimeoutMs, 2500));
   const observation = response.value || {};
   const state = page.state || pageStates.get(page.targetId);
@@ -773,6 +829,7 @@ async function observePageForSettlement(page) {
     title: typeof observation.title === 'string' ? observation.title : '',
     readyState: typeof observation.readyState === 'string' ? observation.readyState : 'unknown',
     text: typeof observation.text === 'string' ? observation.text : '',
+    visibleControlCount: Number(observation.visibleControlCount || 0),
     navigationSerial: Number(state?.navigationSerial || 0),
   };
 }
