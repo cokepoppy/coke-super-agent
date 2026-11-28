@@ -9,6 +9,7 @@ import { config } from './config.ts';
 import { assertTokenEncryptionKey, decryptSandboxTrafficToken, encryptSandboxTrafficToken } from './token-crypto.ts';
 import { sanitizeRunTrace } from './task-store.ts';
 import { provisionTenantWorkspace, TenantWorkspaceConfigurationError } from './tenant-workspace.ts';
+import { desktopBootstrapTimeoutMs } from './runtime-timeouts.ts';
 
 interface ComputerRow extends RowDataPacket {
   sandbox_id: string | null;
@@ -26,7 +27,6 @@ type ComputerOperation = { generation: number } & (
 );
 
 const desktopBootstrapByTenant = new Map<string, Promise<void>>();
-const desktopBootstrapTimeoutMs = 30 * 60_000;
 
 type TraceSink = (event: RunTraceEvent) => Promise<void>;
 type ComputerStartOptions = { purpose?: 'desktop' | 'task'; trace?: TraceSink; runId?: string };

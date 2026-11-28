@@ -16,6 +16,7 @@ import { runGuestPty, stageRuntimeBundle, startGuestPty } from './runtime-bundle
 import { appendRunTrace, sanitizeRunTrace, transitionRun } from './task-store.ts';
 import { isGuestAgentProcessCommandLine } from './guest-process-identity.ts';
 import { classifyGuestRunRecovery } from './guest-run-recovery.ts';
+import { desktopReadinessTimeoutMs, guestWorkspacePreparationTimeoutMs } from './runtime-timeouts.ts';
 
 interface PendingRun extends RowDataPacket {
   id: string;
@@ -57,7 +58,6 @@ const hostBundlePromises = new Map<string, Promise<HostRuntimeBundle>>();
 const runtimeErrorLogAt = new Map<string, number>();
 const runtimeErrorLogSuppressed = new Map<string, number>();
 const guestTerminalExitGraceMs = 35_000;
-const desktopReadinessTimeoutMs = 8 * 60_000;
 
 export function startAgentRuntime(): void {
   stopped = false;
@@ -215,13 +215,22 @@ async function executeRun(run: PendingRun): Promise<void> {
     await trace(run, { component: 'cube', stage: 'sandbox.data-plane.connected', level: 'info', message: '已连接租户 microVM 数据面，开始准备任务工作目录。', details: { computerState: computer.state, desktopState: computer.desktopState } });
     const runDirectory = `/workspace/.csa-super-agent/runs/${run.id}`;
     const taskDirectory = `/workspace/tasks/${run.thread_id}`;
-    const prepared = await runGuestPty(
-      sandbox,
-      `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_uid="$(/usr/bin/id -u "$desktop_user")"; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; install -d -m 0755 /opt/csa-agent-runtime /var/lib/csa-agent-runtime /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; chown "$desktop_uid:$desktop_gid" /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; install -d -o "$desktop_uid" -g "$desktop_gid" -m 0700 ${runDirectory} ${taskDirectory}`,
-      '/', {}, undefined, 45_000,
-    );
-    if (prepared.exitCode !== 0) throw new Error('无法准备租户的 Agent Runtime 工作目录。');
-    await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.ready', level: 'info', message: '租户任务目录与 runtime 目录已准备好。', details: { threadId: run.thread_id } });
+    const workspacePrepareStartedAt = Date.now();
+    await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.start', level: 'info', message: '通过 Cube envd 命令接口准备租户任务目录。', details: { threadId: run.thread_id, timeoutMs: guestWorkspacePreparationTimeoutMs } });
+    const prepareCommand = `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_uid="$(/usr/bin/id -u "$desktop_user")"; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; install -d -m 0755 /opt/csa-agent-runtime /var/lib/csa-agent-runtime /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; chown "$desktop_uid:$desktop_gid" /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; install -d -o "$desktop_uid" -g "$desktop_gid" -m 0700 ${runDirectory} ${taskDirectory}`;
+    let prepared: Awaited<ReturnType<typeof sandbox.commands.run>>;
+    try {
+      prepared = await sandbox.commands.run(prepareCommand, { cwd: '/', timeoutMs: guestWorkspacePreparationTimeoutMs });
+    } catch (error) {
+      await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.failed', level: 'error', message: 'Cube envd 命令接口准备租户任务目录失败。', durationMs: Date.now() - workspacePrepareStartedAt, details: { timeoutMs: guestWorkspacePreparationTimeoutMs, ...runtimeErrorDetails(error) } });
+      throw error;
+    }
+    if (prepared.exitCode !== 0) {
+      const outputTail = String(prepared.stderr || prepared.stdout || '').trim().slice(-800);
+      await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.failed', level: 'error', message: '租户任务目录准备命令返回非零状态。', durationMs: Date.now() - workspacePrepareStartedAt, details: { exitCode: prepared.exitCode, outputTail } });
+      throw new Error('无法准备租户的 Agent Runtime 工作目录。' + (outputTail ? ' ' + outputTail : ''));
+    }
+    await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.ready', level: 'info', message: '租户任务目录与 runtime 目录已准备好。', durationMs: Date.now() - workspacePrepareStartedAt, details: { threadId: run.thread_id } });
 
     const runtimeFiles = {
       packageJson: await readFile(resolve(guestPackageDirectory, 'package.json'), 'utf8'),

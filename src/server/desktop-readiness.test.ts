@@ -2,11 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { ComputerView } from '../shared/types.ts';
 import { DesktopReadinessError, waitForTenantDesktopReady } from './desktop-readiness.ts';
+import { desktopBootstrapTimeoutMs, desktopReadinessTimeoutMs } from './runtime-timeouts.ts';
 
 const computer = (state: ComputerView['state'], desktopState: ComputerView['desktopState']): ComputerView => ({
   state,
   desktopState,
   updatedAt: new Date(0).toISOString(),
+});
+
+test('task readiness budget does not expire before the desktop bootstrap budget', () => {
+  assert.equal(desktopReadinessTimeoutMs, desktopBootstrapTimeoutMs);
 });
 
 test('waits until both the tenant VM and desktop are ready', async () => {
