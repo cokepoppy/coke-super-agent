@@ -150,6 +150,14 @@ export async function waitForBrowserActionSettle(options) {
   };
 }
 
+export async function settleAndInspectBrowserPage(options) {
+  const { inspectPage: inspect, ...settleOptions } = options;
+  const settled = await waitForBrowserActionSettle(settleOptions);
+  const settledPage = settled.page;
+  const result = await inspect(settledPage);
+  return { ...settled, page: settledPage, result };
+}
+
 async function runDesktopCommand(command, args, options) {
   const startedAt = Date.now();
   traceComputerTool('desktop.command.start', { command, timeoutMs: Number.isSafeInteger(options?.timeout) ? options.timeout : null });
@@ -276,7 +284,7 @@ export function apply(ctx) {
           }));
           const initialUrl = initialState.url || page.state?.url || page.info?.url || '';
           await navigatePage(page, targetUrl);
-          const settled = await waitForBrowserActionSettle({
+          const settled = await settleAndInspectBrowserPage({
             page,
             previousTargetIds,
             initialUrl,
@@ -289,9 +297,9 @@ export function apply(ctx) {
             timeoutMs: 5000,
             minWaitMs: 1200,
             pollIntervalMs: 200,
+            inspectPage,
           });
-          page = settled.page;
-          const result = await inspectPage(page);
+          const result = settled.result;
           const actionState = {
             settled: settled.settled,
             pageChanged: settled.pageChanged,

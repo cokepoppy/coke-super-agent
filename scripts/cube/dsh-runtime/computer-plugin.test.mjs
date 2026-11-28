@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { waitForBrowserActionSettle } from './computer-plugin.mjs';
+import { settleAndInspectBrowserPage, waitForBrowserActionSettle } from './computer-plugin.mjs';
 
 function fakeClock() {
   let value = 0;
@@ -132,4 +132,43 @@ test('waits for rendered page text or controls after navigation before reporting
   assert.equal(result.contentChanged, true);
   assert.equal(result.observedUrl, 'https://www.taobao.com/');
   assert.ok(reads >= 5);
+});
+
+test('inspects and returns the page selected by navigation settlement', async () => {
+  const clock = fakeClock();
+  const homePage = { targetId: 'home' };
+  const resultPage = { targetId: 'results' };
+  let inspectedPage;
+  const result = await settleAndInspectBrowserPage({
+    page: homePage,
+    previousTargetIds: new Set(['home']),
+    initialUrl: 'https://www.taobao.com/',
+    initialText: '首页',
+    readTargets: async () => [
+      { id: 'home', type: 'page', url: 'https://www.taobao.com/' },
+      { id: 'results', type: 'page', url: 'https://s.taobao.com/search?q=mouse' },
+    ],
+    readPage: async page => ({
+      url: page.targetId === 'results' ? 'https://s.taobao.com/search?q=mouse' : 'https://www.taobao.com/',
+      title: page.targetId === 'results' ? '搜索结果' : '淘宝',
+      readyState: 'complete',
+      text: page.targetId === 'results' ? '商品列表' : '首页',
+      navigationSerial: 1,
+    }),
+    connectTarget: async target => resultPage,
+    inspectPage: async page => {
+      inspectedPage = page;
+      return { title: '搜索结果', url: 'https://s.taobao.com/search?q=mouse', text: '商品列表' };
+    },
+    timeoutMs: 1_000,
+    minWaitMs: 200,
+    pollIntervalMs: 100,
+    now: clock.now,
+    sleep: clock.sleep,
+  });
+
+  assert.equal(result.page, resultPage);
+  assert.equal(inspectedPage, resultPage);
+  assert.equal(result.result.title, '搜索结果');
+  assert.equal(result.settled, true);
 });
