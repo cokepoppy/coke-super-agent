@@ -217,16 +217,19 @@ async function executeRun(run: PendingRun): Promise<void> {
     const taskDirectory = `/workspace/tasks/${run.thread_id}`;
     const workspacePrepareStartedAt = Date.now();
     await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.start', level: 'info', message: '通过 Cube envd 命令接口准备租户任务目录。', details: { threadId: run.thread_id, timeoutMs: guestWorkspacePreparationTimeoutMs } });
-    const prepareCommand = `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_uid="$(/usr/bin/id -u "$desktop_user")"; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; install -d -m 0755 /opt/csa-agent-runtime /var/lib/csa-agent-runtime /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; chown "$desktop_uid:$desktop_gid" /workspace/.csa-super-agent /workspace/.csa-super-agent/runs /workspace/tasks; install -d -o "$desktop_uid" -g "$desktop_gid" -m 0700 ${runDirectory} ${taskDirectory}`;
-    let prepared: Awaited<ReturnType<typeof sandbox.commands.run>>;
+    const prepareCommand = `set -eu; echo CSA_WORKSPACE_DIRECTORY_CREATE_START; install -d -o 1000 -g 1000 -m 0700 ${runDirectory} ${taskDirectory}; echo CSA_WORKSPACE_DIRECTORY_CREATE_COMPLETE`;
+    let prepared: Awaited<ReturnType<typeof runGuestPty>>;
     try {
-      prepared = await sandbox.commands.run(prepareCommand, { cwd: '/', timeoutMs: guestWorkspacePreparationTimeoutMs });
+      prepared = await runGuestPty(sandbox, prepareCommand, '/', {}, line => {
+        if (line !== 'CSA_WORKSPACE_DIRECTORY_CREATE_START' && line !== 'CSA_WORKSPACE_DIRECTORY_CREATE_COMPLETE') return;
+        void trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.progress', level: 'info', message: line === 'CSA_WORKSPACE_DIRECTORY_CREATE_START' ? '正在创建本次任务的用户工作目录。' : '任务目录创建命令已完成。', details: { milestone: line === 'CSA_WORKSPACE_DIRECTORY_CREATE_START' ? 'directories-start' : 'directories-complete' } }).catch(() => undefined);
+      }, guestWorkspacePreparationTimeoutMs);
     } catch (error) {
-      await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.failed', level: 'error', message: 'Cube envd 命令接口准备租户任务目录失败。', durationMs: Date.now() - workspacePrepareStartedAt, details: { timeoutMs: guestWorkspacePreparationTimeoutMs, ...runtimeErrorDetails(error) } });
+      await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.failed', level: 'error', message: 'Cube guest PTY 准备本次任务目录失败。', durationMs: Date.now() - workspacePrepareStartedAt, details: { timeoutMs: guestWorkspacePreparationTimeoutMs, ...runtimeErrorDetails(error) } });
       throw error;
     }
     if (prepared.exitCode !== 0) {
-      const outputTail = String(prepared.stderr || prepared.stdout || '').trim().slice(-800);
+      const outputTail = String(prepared.output || '').trim().slice(-800);
       await trace(run, { component: 'agent-runtime', stage: 'guest.workspace.prepare.failed', level: 'error', message: '租户任务目录准备命令返回非零状态。', durationMs: Date.now() - workspacePrepareStartedAt, details: { exitCode: prepared.exitCode, outputTail } });
       throw new Error('无法准备租户的 Agent Runtime 工作目录。' + (outputTail ? ' ' + outputTail : ''));
     }

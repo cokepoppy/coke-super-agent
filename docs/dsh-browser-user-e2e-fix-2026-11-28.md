@@ -40,7 +40,9 @@ These defects explain why the tool result could be stale or incomplete. They do 
 ### Repairs
 
 - Share a 30-minute desktop readiness budget with the desktop bootstrap budget so a progressing Linux desktop is not abandoned at eight minutes.
-- Prepare workspace directories through the Cube envd command API with a three-minute deadline, and log start, completion duration, exit code, and bounded stderr/stdout on failure. This avoids the 45-second PTY bootstrap timeout.
+- Release `.2` switched workspace setup to Cube envd `commands.run` with a 180-second hard deadline. Live run `16f1616c-32e7-4a08-9500-0bab16c116cb` failed after 180.8 seconds with `deadline_exceeded` before any DSH step.
+- Read-only inspection confirmed the template's `/workspace/.csa-super-agent`, `/workspace/.csa-super-agent/runs`, and `/workspace/tasks` directories already existed and belonged to the `user` account. An isolated guest PTY probe for only the two per-run `install -d -o 1000 -g 1000` operations completed in seconds; the temporary probe directories were removed. The SDK envd stream deadline, not the requested UI or DSH tool, was the active failure point.
+- Release `.3` skips redundant parent creation and `chown`, creates only the run and task directories with UID/GID 1000 through the working guest PTY, and records start/completion milestones. The PTY deadline is two minutes.
 - Release `0.1.0-dev.20261128.2` checks the listener PID, working directory, and release build path for API and public-web ports after deployment and rollback. HTTP health alone no longer counts as successful release verification.
 
 ### Verification before public UI retest
@@ -48,5 +50,6 @@ These defects explain why the tool result could be stale or incomplete. They do 
 - TypeScript and Vite production build: passed.
 - Server test suite: 25 passed using a temporary isolated MySQL schema; the schema and its temporary grant were removed after the run.
 - DSH runtime tests: 4 passed, including route stabilization and the bounded 40-step/25-minute task budget.
+- After the `.3` workspace change, TypeScript/Vite build passed, desktop readiness tests passed (5), and DSH runtime tests passed (4).
 - Release deploy/rollback shell syntax and `git diff --check`: passed.
-- Public UI acceptance for a fresh Tetris artifact and a real Taobao product-results page: pending deployment of this repair pass.
+- Public UI acceptance for a fresh Tetris artifact and a real Taobao product-results page: pending deployment of `.3`.
