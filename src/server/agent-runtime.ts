@@ -467,15 +467,25 @@ async function executeDshRunInDocker(run: PendingRun, model: { baseUrl: string; 
   await trace(run, { component: 'desktop', stage: 'docker.runtime.health.ready', level: 'info', message: '已确认租户 Docker 桌面、Chrome CDP 和 noVNC WebSocket 在线，再启动 DSH。', durationMs: Date.now() - startedAt, details: { desktopLoopbackPort: target.port, ...desktopProbe } });
 
   const cubeTaskWorkspace = `/workspace/tasks/${run.thread_id}`;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(run.thread_id)) {
+    throw new Error('任务对话 ID 无效，拒绝构造 Cube 远程工作区路径。');
+  }
   const workspaceStartedAt = Date.now();
-  await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.start', level: 'info', message: '在租户 microVM 的持久工作区中创建当前任务目录，供 Docker DSH 远端 Bash 使用。', details: { threadId: run.thread_id, cwd: cubeTaskWorkspace } });
+  const workspaceTimeoutMs = 120_000;
+  await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.start', level: 'info', message: '通过 Cube PTY 在租户 microVM 的持久工作区中创建当前任务目录，供 Docker DSH 远端 Bash 使用。', details: { threadId: run.thread_id, cwd: cubeTaskWorkspace, transport: 'cube-pty', timeoutMs: workspaceTimeoutMs } });
   const sandbox = await connectTenantSandbox(run.tenant_id);
   try {
-    const prepared = await sandbox.commands.run(
-      `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; /usr/bin/install -d -o 1000 -g "$desktop_gid" -m 0700 ${cubeTaskWorkspace}`,
-      { user: 'root', cwd: '/', timeoutMs: 45_000 },
+    const prepared = await runGuestPty(
+      sandbox,
+      `set -eu; desktop_user="$(/usr/bin/getent passwd 1000 | /usr/bin/cut -d: -f1)"; if [ -z "$desktop_user" ]; then echo 'desktop UID 1000 is missing' >&2; exit 1; fi; desktop_gid="$(/usr/bin/id -g "$desktop_user")"; /usr/bin/install -d -o 1000 -g "$desktop_gid" -m 0700 ${cubeTaskWorkspace}; printf 'csa_task_workspace_ready=%s\\n' ${cubeTaskWorkspace}`,
+      '/',
+      {},
+      undefined,
+      workspaceTimeoutMs,
     );
-    if (prepared.exitCode !== 0) throw new Error('无法准备租户 microVM 的任务工作目录。');
+    if (prepared.exitCode !== 0) {
+      throw new Error(`无法准备租户 microVM 的任务工作目录（exit ${prepared.exitCode}）：${prepared.output.slice(-800)}`);
+    }
   } catch (error) {
     await trace(run, { component: 'workspace', stage: 'cube.task-workspace.prepare.failed', level: 'error', message: '租户 microVM 任务目录准备失败，未启动 DSH。', durationMs: Date.now() - workspaceStartedAt, details: runtimeErrorDetails(error) });
     throw error;
