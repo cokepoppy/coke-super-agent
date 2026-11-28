@@ -191,8 +191,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .empty-card { max-width: 930px; margin: auto; padding: 22px; }
 
 .computer-page { display: grid; place-items: center; background: radial-gradient(ellipse at 50% 43%, #fafaf8 0, #fff 61%); }
-.computer-page.desktop-ready { display: flex; min-height: 0; padding: 0; background: #f3f3f2; }
-.desktop-view { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; }
+.computer-page.desktop-ready { width: 100%; display: flex; min-width: 0; min-height: 0; flex: 1 1 0%; overflow: hidden; padding: 0; background: #f3f3f2; }
+.desktop-view { width: 100%; height: 100%; display: flex; min-width: 0; min-height: 0; flex: 1 1 0%; flex-direction: column; }
 .desktop-toolbar { display: flex; height: 43px; flex: none; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid #e9e8e5; background: #fff; color: #5f5b65; font-size: 11px; }
 .desktop-toolbar>div { display: flex; align-items: center; gap: 9px; }
 .desktop-browser-status { border-radius: 4px; padding: 4px 6px; }
@@ -202,7 +202,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px
 .desktop-toolbar button { border: 0; padding: 4px; background: transparent; font: inherit; cursor: pointer; }
 .desktop-toolbar button:disabled { opacity: .6; cursor: wait; }
 .desktop-toolbar a:hover, .desktop-toolbar button:hover:not(:disabled) { color: #25232a; }
-.desktop-frame { width: 100%; min-height: 0; flex: 1; border: 0; background: #151515; }
+.desktop-frame { width: 100%; height: 0; min-width: 0; min-height: 0; display: block; flex: 1 1 0%; border: 0; background: #151515; }
 .computer-card { width: min(490px, 100%); display: flex; flex-direction: column; align-items: center; text-align: center; }
 .computer-illustration { width: 156px; height: 110px; position: relative; margin: 0 0 26px; }
 .computer-window { position: absolute; inset: 4px 8px 21px; display: grid; grid-template-columns: repeat(3, 5px) 1fr; align-content: start; align-items: center; gap: 5px; padding: 10px; border: 1px solid #c8c5cf; border-radius: 9px; background: linear-gradient(145deg, #f4f1fa, #eef9f2); box-shadow: 0 8px 22px #34254a13; }
