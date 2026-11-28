@@ -1,5 +1,6 @@
 const maxCommandLength = 64 * 1024;
 const maxOutputLength = 48 * 1024;
+const minimumTimeoutMs = 60_000;
 
 export const name = 'coke-super-agent-remote-terminal';
 export const inject = ['tools'];
@@ -67,7 +68,7 @@ export function apply(ctx) {
       properties: {
         command: { type: 'string', minLength: 1, maxLength: maxCommandLength },
         cwd: { type: 'string', maxLength: 4096 },
-        timeoutMs: { type: 'integer', minimum: 1000, maximum: 900000 },
+        timeoutMs: { type: 'integer', minimum: minimumTimeoutMs, maximum: 900000 },
       },
       required: ['command'],
       additionalProperties: false,
@@ -81,7 +82,7 @@ export function apply(ctx) {
       if (typeof args.command !== 'string' || !args.command.trim() || args.command.length > maxCommandLength || args.command.includes('\0')) {
         throw new Error('Remote Bash command is invalid.');
       }
-      const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? Math.max(1000, Math.min(900000, args.timeoutMs)) : 300000;
+      const timeoutMs = Number.isSafeInteger(args.timeoutMs) ? Math.max(minimumTimeoutMs, Math.min(900000, args.timeoutMs)) : 300000;
       const requestedCwd = typeof args.cwd === 'string' && args.cwd.trim() ? args.cwd : workspace;
       if (!requestedCwd.startsWith('/') || requestedCwd.includes('\0') || requestedCwd.length > 4096) {
         throw new Error('Remote Bash working directory must be an absolute path inside the tenant microVM.');

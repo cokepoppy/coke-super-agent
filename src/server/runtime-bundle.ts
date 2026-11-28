@@ -41,17 +41,30 @@ export async function runGuestPty(
   envs: Record<string, string> = {},
   onOutputLine?: (line: string) => void,
   maxDurationMs = 0,
-): Promise<{ exitCode: number; output: string }> {
+  maxOutputBytes = Number.POSITIVE_INFINITY,
+): Promise<{ exitCode: number; output: string; outputBytes: number; outputTruncated: boolean }> {
   // Replace Cube's interactive login shell with a non-interactive bash process.
   // Sending `exit $?` in the same PTY write is unreliable for long commands:
   // the command can finish and print its final marker while the login shell
   // remains attached, leaving wait() blocked indefinitely.
   const handle = await startGuestPty(sandbox, `exec bash -c ${shellQuote(command)}`, cwd, envs, true);
   const decoder = new TextDecoder();
-  let output = '';
+  const outputParts: Buffer[] = [];
+  const outputLimit = Number.isFinite(maxOutputBytes) ? Math.max(0, Math.floor(maxOutputBytes)) : Number.POSITIVE_INFINITY;
+  let outputBytes = 0;
+  let retainedOutputBytes = 0;
+  let outputTruncated = false;
   let pendingLine = '';
   const collect = (text: string): void => {
-    output += text;
+    const data = Buffer.from(text, 'utf8');
+    outputBytes += data.byteLength;
+    const remainingBytes = Math.max(0, outputLimit - retainedOutputBytes);
+    if (remainingBytes > 0) {
+      const retained = data.subarray(0, remainingBytes);
+      outputParts.push(retained);
+      retainedOutputBytes += retained.byteLength;
+    }
+    if (data.byteLength > remainingBytes) outputTruncated = true;
     if (!onOutputLine) return;
     pendingLine += text;
     let newline: number;
@@ -74,7 +87,12 @@ export async function runGuestPty(
       : await wait;
     collect(decoder.decode());
     if (pendingLine.trim()) onOutputLine?.(pendingLine.slice(0, 2400));
-    return { exitCode, output };
+    return {
+      exitCode,
+      output: Buffer.concat(outputParts).toString('utf8'),
+      outputBytes,
+      outputTruncated,
+    };
   } catch (error) {
     if (timeout) await handle.kill().catch(() => false);
     throw error;

@@ -9,6 +9,7 @@ import { verifyAgentBridgeToken } from './agent-bridge-token.ts';
 import { clearSessionCookie, login, logout, sessionFromRequest, setSessionCookie } from './auth.ts';
 import { pool } from './db.ts';
 import { config } from './config.ts';
+import { runGuestPty } from './runtime-bundle.ts';
 import { createQueuedReplyRun, createQueuedRun, getRunDetail, listEventsAfter, listRecentActivity, listRuns, runExists } from './task-store.ts';
 import { ComputerNotConfiguredError, ComputerNotReadyError, ComputerOperationError, ComputerRecoveryRequiredError, DesktopNotReadyError, connectTenantSandbox, getTenantBrowserState, getTenantComputer, retryTenantBrowser, startTenantComputer } from './computer.ts';
 import { proxyDesktopHttp, proxyDesktopUpgrade } from './desktop-proxy.ts';
@@ -217,7 +218,7 @@ export function createHttpServer() {
         if (typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.includes('\0') || cwd.length > 4096) {
           throw new HttpError(400, '远端 Bash 工作目录无效');
         }
-        if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 1_000 || Number(timeoutMs) > 900_000) {
+        if (!Number.isSafeInteger(timeoutMs) || Number(timeoutMs) < 60_000 || Number(timeoutMs) > 900_000) {
           throw new HttpError(400, '远端 Bash 超时参数无效');
         }
         const [runs] = await pool.execute<Array<{ tenant_id: string; status: string } & import('mysql2/promise').RowDataPacket>>(
@@ -229,37 +230,40 @@ export function createHttpServer() {
         const startedAt = Date.now();
         let executionStage = 'cube.connect';
         let sandbox: Awaited<ReturnType<typeof connectTenantSandbox>> | undefined;
+        writeHttpLog('agent.bridge.terminal.start', 'info', {
+          requestId,
+          tenantId: claims.tenantId,
+          runId: claims.runId,
+          transport: 'cube-pty',
+          cwd,
+          timeoutMs,
+          commandBytes: Buffer.byteLength(command, 'utf8'),
+        });
         try {
           sandbox = await connectTenantSandbox(claims.tenantId);
-          executionStage = 'cube.commands.run';
-          const result = await sandbox.commands.run(command, { user: 'root', cwd, timeoutMs: Number(timeoutMs) });
           const maxOutputBytes = 48 * 1024;
-          const bounded = (value: string): { text: string; truncated: boolean } => {
-            const data = Buffer.from(value || '', 'utf8');
-            if (data.byteLength <= maxOutputBytes) return { text: value || '', truncated: false };
-            return { text: data.subarray(0, maxOutputBytes).toString('utf8'), truncated: true };
-          };
-          const stdout = bounded(result.stdout || '');
-          const stderr = bounded(result.stderr || '');
-          const outputBytes = Buffer.byteLength(result.stdout || '') + Buffer.byteLength(result.stderr || '');
+          executionStage = 'cube.pty.run';
+          const result = await runGuestPty(sandbox, command, cwd, {}, undefined, Number(timeoutMs), maxOutputBytes);
+          const outputTruncated = result.outputTruncated;
           writeHttpLog('agent.bridge.terminal.complete', 'info', {
             requestId,
             tenantId: claims.tenantId,
             runId: claims.runId,
+            transport: 'cube-pty',
             cwd,
             timeoutMs,
             commandBytes: Buffer.byteLength(command, 'utf8'),
             durationMs: Date.now() - startedAt,
             exitCode: result.exitCode,
-            outputBytes,
-            outputTruncated: stdout.truncated || stderr.truncated,
+            outputBytes: result.outputBytes,
+            outputTruncated,
           });
           json(res, 200, {
             exitCode: result.exitCode,
             durationMs: Date.now() - startedAt,
-            stdout: stdout.text,
-            stderr: stderr.text,
-            outputTruncated: stdout.truncated || stderr.truncated,
+            stdout: result.output,
+            stderr: '',
+            outputTruncated,
           });
         } catch (error) {
           writeHttpLog('agent.bridge.terminal.failed', 'error', {
@@ -267,6 +271,7 @@ export function createHttpServer() {
             tenantId: claims.tenantId,
             runId: claims.runId,
             executionStage,
+            transport: executionStage === 'cube.pty.run' ? 'cube-pty' : undefined,
             cwd,
             timeoutMs,
             commandBytes: Buffer.byteLength(command, 'utf8'),
