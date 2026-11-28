@@ -103,7 +103,7 @@ restart_service() {
     bootout_status=0
     /bin/launchctl bootout "$launch_domain/$label" >/dev/null 2>&1 || bootout_status=$?
     removed=0
-    for _ in $(seq 1 10); do
+    for _ in $(seq 1 100); do
       if ! /bin/launchctl print "$launch_domain/$label" >/dev/null 2>&1; then removed=1; break; fi
       sleep 0.3
     done
@@ -116,7 +116,7 @@ restart_service() {
   bootstrap_status=0
   /bin/launchctl bootstrap "$launch_domain" "$destination" >/dev/null 2>&1 || bootstrap_status=$?
   loaded=0
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 100); do
     if /bin/launchctl print "$launch_domain/$label" >/dev/null 2>&1; then loaded=1; break; fi
     sleep 0.3
   done
