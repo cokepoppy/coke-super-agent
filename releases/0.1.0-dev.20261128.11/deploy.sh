@@ -91,6 +91,16 @@ for _ in $(seq 1 100); do
   sleep 0.3
 done
 if [ "$removed" != "1" ]; then echo "Public web LaunchAgent stayed loaded (bootout status $bootout_status)." >&2; exit 1; fi
+port_released=0
+for _ in $(seq 1 100); do
+  if ! /usr/sbin/lsof -nP -iTCP:5174 -sTCP:LISTEN >/dev/null 2>&1; then port_released=1; break; fi
+  sleep 0.3
+done
+if [ "$port_released" != "1" ]; then
+  echo "Previous public-web process kept port 5174 after LaunchAgent bootout." >&2
+  /bin/launchctl bootstrap "$launch_domain" "$installed_plist" >/dev/null 2>&1 || true
+  exit 1
+fi
 /usr/bin/install -m 0644 "$artifact/launch-agents/$label.plist" "$installed_plist"
 bootstrap_status=0
 /bin/launchctl bootstrap "$launch_domain" "$installed_plist" >/dev/null 2>&1 || bootstrap_status=$?
@@ -100,6 +110,17 @@ for _ in $(seq 1 100); do
   sleep 0.3
 done
 if [ "$loaded" != "1" ]; then echo "Public web LaunchAgent failed to register (bootstrap status $bootstrap_status)." >&2; exit 1; fi
+
+web_ready=0
+for _ in $(seq 1 100); do
+  if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:5174/super-agent/ -o /dev/null 2>/dev/null; then web_ready=1; break; fi
+  sleep 0.3
+done
+if [ "$web_ready" != "1" ]; then
+  echo "New public-web listener did not become ready within 30 seconds; restoring the previous web release." >&2
+  bash "$repo_root/releases/$release_id/rollback.sh" || true
+  exit 1
+fi
 
 curl --fail --silent --show-error --max-time 15 http://127.0.0.1:5174/super-agent/ -o "$artifact/index.html"
 css_path="$(python3 - "$artifact/index.html" <<'PY'
